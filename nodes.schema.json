@@ -1,0 +1,283 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/individuation-nodes.schema.json",
+  "title": "Individuation Journey NodeDefinitions",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "nodes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/NodeDefinition"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "NodeType": {
+      "type": "string",
+      "enum": [
+        "spiral",
+        "tree",
+        "hybrid"
+      ]
+    },
+    "NodePhase": {
+      "type": "string",
+      "enum": [
+        "ego",
+        "persona",
+        "shadow",
+        "inner_other",
+        "disintegration",
+        "recenter",
+        "integration",
+        "reentry",
+        "domain",
+        "meta"
+      ]
+    },
+    "NodeDomain": {
+      "type": "string",
+      "enum": [
+        "meta",
+        "inner",
+        "work",
+        "relationships",
+        "meaning",
+        "body"
+      ]
+    },
+    "SpiralPosition": {
+      "type": "object",
+      "required": [
+        "theta",
+        "radius",
+        "order"
+      ],
+      "properties": {
+        "theta": {
+          "type": "number"
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "TreePosition": {
+      "type": "object",
+      "required": [
+        "x",
+        "y",
+        "branch",
+        "level",
+        "parent_id"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "level": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "UIPosition": {
+      "type": "object",
+      "properties": {
+        "spiral": {
+          "$ref": "#/definitions/SpiralPosition"
+        },
+        "tree": {
+          "$ref": "#/definitions/TreePosition"
+        }
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "spiral"
+          ]
+        },
+        {
+          "required": [
+            "tree"
+          ]
+        }
+      ]
+    },
+    "NodeDefinition": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "type",
+        "phase",
+        "domain",
+        "description",
+        "dependencies",
+        "tags",
+        "prompt_template",
+        "ui_position",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "$ref": "#/definitions/NodeType"
+        },
+        "phase": {
+          "$ref": "#/definitions/NodePhase"
+        },
+        "domain": {
+          "$ref": "#/definitions/NodeDomain"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "uniqueItems": true
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "prompt_template": {
+          "type": "string",
+          "minLength": 10
+        },
+        "ui_position": {
+          "$ref": "#/definitions/UIPosition"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "personalization_prompts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": []
+        },
+        "symbol_focus": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "spiral"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ui_position": {
+                "required": [
+                  "spiral"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "tree"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ui_position": {
+                "required": [
+                  "tree"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "hybrid"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ui_position": {
+                "required": [
+                  "spiral",
+                  "tree"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
