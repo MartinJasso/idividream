@@ -70,14 +70,15 @@ export async function getGlobalSettings(): Promise<AppSettings | undefined> {
 
 export async function setCurrentNode(nodeId: string) {
   const s = await db.appSettings.get("global");
+  const defaultOpenAiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
   await db.appSettings.put({
     key: "global",
     currentNodeId: nodeId,
     currentSpiralOrder: s?.currentSpiralOrder,
-    openAiApiKey: s?.openAiApiKey,
-    modelChat: s?.modelChat ?? "gpt-5.2-thinking",
-    modelExtract: s?.modelExtract ?? "gpt-5.2-thinking",
-    modelSummarize: s?.modelSummarize ?? "gpt-5.2-thinking",
+    openAiApiKey: s?.openAiApiKey ?? defaultOpenAiApiKey,
+    modelChat: s?.modelChat ?? "gpt-5-nano",
+    modelExtract: s?.modelExtract ?? "gpt-5-nano",
+    modelSummarize: s?.modelSummarize ?? "gpt-5-nano",
     updatedAt: nowIso(),
   });
 }

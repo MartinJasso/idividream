@@ -90,14 +90,15 @@ export async function ensureUserNodeStateRows() {
 export async function upsertGlobalSettings(partial: Partial<AppSettings>) {
   const key = "global";
   const existing = await db.appSettings.get(key);
+  const defaultOpenAiApiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
   const next: AppSettings = {
     key,
     currentNodeId: existing?.currentNodeId,
     currentSpiralOrder: existing?.currentSpiralOrder,
-    openAiApiKey: existing?.openAiApiKey,
-    modelChat: existing?.modelChat ?? "gpt-5.2-thinking",
-    modelExtract: existing?.modelExtract ?? "gpt-5.2-thinking",
-    modelSummarize: existing?.modelSummarize ?? "gpt-5.2-thinking",
+    openAiApiKey: existing?.openAiApiKey ?? defaultOpenAiApiKey,
+    modelChat: existing?.modelChat ?? "gpt-5-nano",
+    modelExtract: existing?.modelExtract ?? "gpt-5-nano",
+    modelSummarize: existing?.modelSummarize ?? "gpt-5-nano",
     updatedAt: nowIso(),
     ...partial,
     key,
