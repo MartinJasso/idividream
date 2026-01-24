@@ -7,6 +7,7 @@ import { db } from "../../db";
 import { computeNodeStatuses, getGlobalSettings } from "../../journey";
 import { normalizeModel } from "../../model";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
+import { renderFirstTimePrompt } from "../../src/config/firstTimePrompts";
 import type {
   AppSettings,
   ComputedNodeStatus,
@@ -104,6 +105,7 @@ export default function ChatPageRoute() {
 
   const [composer, setComposer] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dreamExtractions, setDreamExtractions] = useState<Record<string, DreamExtractionRecord>>(
     {}
@@ -117,6 +119,7 @@ export default function ChatPageRoute() {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const seededRef = useRef(false);
+  const initAttemptedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (nodeId) return;
@@ -208,18 +211,46 @@ export default function ChatPageRoute() {
       const ordered = results.reverse();
       if (!active) return;
       setThreads(ordered);
-      if (!selectedThreadId && ordered.length) {
-        setSelectedThreadId(ordered[0].id);
-      }
+
       if (ordered.length === 0) {
-        setSelectedThreadId(null);
+        if (!node) {
+          setSelectedThreadId(null);
+          return;
+        }
+        const id = crypto.randomUUID();
+        const timestamp = nowIso();
+        const newThread: Thread = {
+          id,
+          nodeId: node.id,
+          title: `${node.title} – First session`,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        await db.threads.put(newThread);
+        if (!active) return;
+        setThreads([newThread]);
+        setSelectedThreadId(id);
+        void initializeThreadIfFirstTime(nodeId, id);
+        return;
+      }
+
+      const nextSelectedId =
+        selectedThreadId && ordered.some((thread) => thread.id === selectedThreadId)
+          ? selectedThreadId
+          : ordered[0].id;
+      setSelectedThreadId(nextSelectedId);
+
+      const messageCount = await db.messages.where("threadId").equals(nextSelectedId).count();
+      if (!active) return;
+      if (messageCount === 0) {
+        void initializeThreadIfFirstTime(nodeId, nextSelectedId);
       }
     };
     loadThreads();
     return () => {
       active = false;
     };
-  }, [nodeId, selectedThreadId]);
+  }, [nodeId, node, selectedThreadId]);
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -263,6 +294,11 @@ export default function ChatPageRoute() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const visibleMessages = useMemo(
+    () => messages.filter((message) => !message.metadata?.hidden),
+    [messages]
+  );
+
   const selectedThread = useMemo(
     () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
     [threads, selectedThreadId]
@@ -304,6 +340,74 @@ export default function ChatPageRoute() {
       return next.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     });
   };
+
+  async function initializeThreadIfFirstTime(targetNodeId: string, threadId: string) {
+    if (initAttemptedRef.current.has(threadId)) return;
+    initAttemptedRef.current.add(threadId);
+    setIsInitializing(true);
+    setErrorMessage(null);
+
+    try {
+      const nodeRow = await db.nodeDefinitions.get(targetNodeId);
+      if (!nodeRow) return;
+      const initPrompt = renderFirstTimePrompt(nodeRow);
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeId: targetNodeId,
+          threadId,
+          userMessage: initPrompt,
+          status: status?.status ?? "locked",
+          unmetDependencies: status?.unmetDependencies ?? [],
+          currentNodeId: settings?.currentNodeId ?? null,
+          currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+          nextNode,
+          apiKey: settings?.openAiApiKey,
+          model: normalizeModel(settings?.modelChat),
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error ?? "Failed to reach the model");
+      }
+
+      const data = await response.json();
+      const assistantText = String(data?.assistant ?? "").trim();
+      if (!assistantText) {
+        throw new Error("No assistant response returned.");
+      }
+
+      const initUserMessage: Message = {
+        id: crypto.randomUUID(),
+        threadId,
+        role: "user",
+        content: initPrompt,
+        createdAt: nowIso(),
+        metadata: { hidden: true, kind: "init_prompt" },
+      };
+      const assistantMessage: Message = {
+        id: crypto.randomUUID(),
+        threadId,
+        role: "assistant",
+        content: assistantText,
+        createdAt: nowIso(),
+        metadata: { kind: "init_assistant" },
+      };
+
+      await db.messages.put(initUserMessage);
+      await db.messages.put(assistantMessage);
+      setMessages((prev) => [...prev, initUserMessage, assistantMessage]);
+      await updateThreadTimestamp(threadId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to initialize thread.";
+      setErrorMessage(message);
+    } finally {
+      setIsInitializing(false);
+    }
+  }
 
   const shouldSummarize = (threadMessages: Message[]) => {
     const totalChars = threadMessages.reduce((acc, msg) => acc + msg.content.length, 0);
@@ -543,7 +647,7 @@ export default function ChatPageRoute() {
 
   const handleSend = async () => {
     if (!node || !selectedThreadId || !composer.trim()) return;
-    if (isSending) return;
+    if (isSending || isInitializing) return;
 
     const messageText = composer.trim();
     const dreamModeEnabled = true;
@@ -785,7 +889,12 @@ export default function ChatPageRoute() {
                     <p className="mt-2 text-slate-400">No summary yet.</p>
                   )}
                 </div>
-                {messages.map((message) => (
+                {isInitializing && (
+                  <div className="max-w-2xl rounded-2xl bg-slate-900 px-4 py-3 text-sm text-slate-300">
+                    Preparing your first step…
+                  </div>
+                )}
+                {visibleMessages.map((message) => (
                   <div key={message.id} className="flex flex-col gap-2">
                     <div
                       className={`max-w-2xl rounded-2xl px-4 py-3 text-sm leading-relaxed ${
@@ -1022,12 +1131,12 @@ export default function ChatPageRoute() {
                 onChange={(event) => setComposer(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
                 placeholder={selectedThread ? "Type your message…" : "Select a thread to start"}
-                disabled={!selectedThread || isSending}
+                disabled={!selectedThread || isSending || isInitializing}
                 className="min-h-[70px] flex-1 resize-none rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               />
               <button
                 onClick={handleSend}
-                disabled={!selectedThread || isSending || !composer.trim()}
+                disabled={!selectedThread || isSending || isInitializing || !composer.trim()}
                 className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 Send
