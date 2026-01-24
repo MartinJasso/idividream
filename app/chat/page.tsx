@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import ChatPage from "../../components/ChatPage";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export default function ChatPageRoute() {
   const searchParams = useSearchParams();
