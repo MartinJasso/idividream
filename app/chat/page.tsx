@@ -105,7 +105,6 @@ export default function ChatPageRoute() {
   const [composer, setComposer] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [dreamMode, setDreamMode] = useState(false);
   const [dreamExtractions, setDreamExtractions] = useState<Record<string, DreamExtractionRecord>>(
     {}
   );
@@ -547,7 +546,7 @@ export default function ChatPageRoute() {
     if (isSending) return;
 
     const messageText = composer.trim();
-    const dreamModeEnabled = dreamMode;
+    const dreamModeEnabled = true;
     setComposer("");
     setErrorMessage(null);
 
@@ -1020,25 +1019,13 @@ export default function ChatPageRoute() {
                 disabled={!selectedThread || isSending}
                 className="min-h-[70px] flex-1 resize-none rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               />
-              <div className="flex flex-col items-end gap-2">
-                <label className="flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={dreamMode}
-                    onChange={(event) => setDreamMode(event.target.checked)}
-                    className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-sky-500"
-                    disabled={!selectedThread || isSending}
-                  />
-                  Dream mode
-                </label>
-                <button
-                  onClick={handleSend}
-                  disabled={!selectedThread || isSending || !composer.trim()}
-                  className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  Send
-                </button>
-              </div>
+              <button
+                onClick={handleSend}
+                disabled={!selectedThread || isSending || !composer.trim()}
+                className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Send
+              </button>
             </div>
           </div>
         </div>
