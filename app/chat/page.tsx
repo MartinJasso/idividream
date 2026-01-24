@@ -1,7 +1,35 @@
 "use client";
 
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { db } from "../../db";
+import { computeNodeStatuses } from "../../journey";
+import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
+import type {
+  AppSettings,
+  ComputedNodeStatus,
+  Message,
+  NodeDefinition,
+  Thread,
+  ThreadSummary,
+} from "../../types";
+
+const STATUS_LABELS: Record<ComputedNodeStatus["status"], string> = {
+  completed: "Completed",
+  next: "Next",
+  available: "Available",
+  locked: "Locked",
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function formatThreadTitle(nodeTitle: string) {
+  const date = new Date();
+  return `${nodeTitle} – ${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+}
 
 export default function ChatPageRoute() {
   const searchParams = useSearchParams();
