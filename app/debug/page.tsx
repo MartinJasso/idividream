@@ -61,6 +61,7 @@ export default function DebugPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [seedMessage, setSeedMessage] = useState<string>("");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
 
   const [selectedNodeId, setSelectedNodeId] = useState<string>("");
   const [chatThreadId, setChatThreadId] = useState("debug-thread");
@@ -120,6 +121,38 @@ export default function DebugPage() {
       setSeedMessage(message);
     } finally {
       setIsRefreshing(false);
+    }
+  };
+
+  const handleFactoryReset = async () => {
+    const confirmed = window.confirm(
+      "This will erase all user data (threads, messages, settings, symbols). Continue?"
+    );
+    if (!confirmed) return;
+    setIsResetting(true);
+    setSeedMessage("");
+    try {
+      await Promise.all([
+        db.userNodeStates.clear(),
+        db.threads.clear(),
+        db.messages.clear(),
+        db.threadSummaries.clear(),
+        db.symbols.clear(),
+        db.personalSymbolMeanings.clear(),
+        db.symbolOccurrences.clear(),
+        db.appSettings.clear(),
+      ]);
+      setSelectedNodeId("");
+      setChatResult({ status: "idle", message: "" });
+      setSummaryResult({ status: "idle", message: "" });
+      await refreshData(false);
+      setSeedMessage("Factory reset complete. All user data erased.");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to reset user data to factory settings.";
+      setSeedMessage(message);
+    } finally {
+      setIsResetting(false);
     }
   };
 
@@ -241,6 +274,13 @@ export default function DebugPage() {
               disabled={isRefreshing}
             >
               Force reseed
+            </button>
+            <button
+              onClick={handleFactoryReset}
+              className="rounded-lg border border-rose-500/60 bg-rose-500/10 px-4 py-2 text-sm text-rose-100 hover:bg-rose-500/20"
+              disabled={isRefreshing || isResetting}
+            >
+              Factory reset
             </button>
           </div>
         </div>
