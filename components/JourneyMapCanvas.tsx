@@ -1,13 +1,27 @@
 "use client";
 
+import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import Konva from "konva";
 import { Circle, Group, Layer, Line, Stage, Text } from "react-konva";
-import type { ComputedNodeStatus, NodeDefinition, NodeStatus } from "../types";
+import { db } from "../db";
+import type {
+  AppSettings,
+  ComputedNodeStatus,
+  Message,
+  NodeDefinition,
+  NodeStatus,
+  PersonalSymbolMeaning,
+  SymbolOccurrence,
+  Thread,
+  ThreadSummary,
+  UserNodeState,
+} from "../types";
 import {
   computeNodeStatuses,
   getAllNodes,
+  getGlobalSettings,
   markNodeCompleted,
   setCurrentNode,
 } from "../journey";
@@ -25,7 +39,16 @@ const STATUS_LABELS: Record<NodeStatus, string> = {
 
 const STATUS_STYLES: Record<
   NodeStatus,
-  { fill: string; stroke: string; text: string; strokeWidth: number; opacity: number }
+  {
+    fill: string;
+    stroke: string;
+    text: string;
+    strokeWidth: number;
+    opacity: number;
+    shadowColor?: string;
+    shadowBlur?: number;
+    shadowOpacity?: number;
+  }
 > = {
   completed: {
     fill: "#22c55e",
@@ -38,8 +61,11 @@ const STATUS_STYLES: Record<
     fill: "#0f172a",
     stroke: "#facc15",
     text: "#f8fafc",
-    strokeWidth: 3,
+    strokeWidth: 4,
     opacity: 1,
+    shadowColor: "#facc15",
+    shadowBlur: 16,
+    shadowOpacity: 0.6,
   },
   available: {
     fill: "#38bdf8",
@@ -57,6 +83,21 @@ const STATUS_STYLES: Record<
   },
 };
 
+const CURRENT_RING = {
+  stroke: "#c026d3",
+  strokeWidth: 3,
+  shadowColor: "#c026d3",
+  shadowBlur: 10,
+  shadowOpacity: 0.7,
+};
+
+const STATUS_BADGE_STYLES: Record<NodeStatus, string> = {
+  completed: "bg-emerald-500/15 text-emerald-200 border-emerald-500/60",
+  next: "bg-yellow-400/15 text-yellow-100 border-yellow-300/70",
+  available: "bg-sky-400/15 text-sky-100 border-sky-400/70",
+  locked: "bg-slate-700/40 text-slate-200 border-slate-600",
+};
+
 interface TooltipState {
   nodeId: string;
   x: number;
@@ -71,6 +112,25 @@ interface NodePoint {
   unmetDependencies?: string[];
 }
 
+interface ExportPayload {
+  version: number;
+  exportedAt: string;
+  userNodeStates: UserNodeState[];
+  threads: Thread[];
+  messages: Message[];
+  threadSummaries: ThreadSummary[];
+  personalSymbolMeanings: PersonalSymbolMeaning[];
+  symbolOccurrences: SymbolOccurrence[];
+  appSettings: AppSettings[];
+}
+
+function formatTimestamp(value?: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 export default function JourneyMapCanvas() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<Konva.Stage | null>(null);
@@ -78,8 +138,13 @@ export default function JourneyMapCanvas() {
 
   const [nodes, setNodes] = useState<NodeDefinition[]>([]);
   const [statusMap, setStatusMap] = useState<Map<string, ComputedNodeStatus>>(new Map());
+  const [userNodeStates, setUserNodeStates] = useState<Map<string, UserNodeState>>(new Map());
+  const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
+  const [exportPayload, setExportPayload] = useState<string>("");
+  const [importPayload, setImportPayload] = useState<string>("");
+  const [importError, setImportError] = useState<string | null>(null);
 
   const [stageScale, setStageScale] = useState(1);
   const [stagePosition, setStagePosition] = useState({ x: 0, y: 0 });
@@ -101,12 +166,16 @@ export default function JourneyMapCanvas() {
   }, []);
 
   const refreshData = useCallback(async () => {
-    const [nodeData, statusData] = await Promise.all([
+    const [nodeData, statusData, userStates, settings] = await Promise.all([
       getAllNodes(),
       computeNodeStatuses(),
+      db.userNodeStates.toArray(),
+      getGlobalSettings(),
     ]);
     setNodes(nodeData);
     setStatusMap(new Map(statusData));
+    setUserNodeStates(new Map(userStates.map((row) => [row.nodeId, row])));
+    setCurrentNodeId(settings?.currentNodeId ?? null);
   }, []);
 
   useEffect(() => {
@@ -153,6 +222,10 @@ export default function JourneyMapCanvas() {
       })
       .filter((point): point is NodePoint => point !== null);
   }, [nodes, statusMap]);
+
+  const nodeById = useMemo(() => {
+    return new Map(nodes.map((node) => [node.id, node]));
+  }, [nodes]);
 
   const spiralPoints = useMemo(() => {
     return nodes
@@ -274,12 +347,18 @@ export default function JourneyMapCanvas() {
     ? nodes.find((node) => node.id === selectedNodeId)
     : null;
   const selectedStatus = selectedNodeId ? statusMap.get(selectedNodeId) : null;
+  const selectedUserState = selectedNodeId ? userNodeStates.get(selectedNodeId) : null;
+  const unmetDetails = selectedStatus?.unmetDependencies?.map((depId) => ({
+    id: depId,
+    title: nodeById.get(depId)?.title ?? "Unknown node",
+  }));
 
   const hoveredNode = tooltip ? nodes.find((node) => node.id === tooltip.nodeId) : null;
   const hoveredStatus = tooltip ? statusMap.get(tooltip.nodeId) : null;
 
   const handleToggleCompleted = async () => {
     if (!selectedNode) return;
+    if (selectedStatus?.status === "locked") return;
     const isCompleted = selectedStatus?.status === "completed";
     await markNodeCompleted(selectedNode.id, !isCompleted);
     await refreshData();
@@ -289,6 +368,122 @@ export default function JourneyMapCanvas() {
     if (!selectedNode) return;
     await setCurrentNode(selectedNode.id);
     await refreshData();
+  };
+
+  const handleImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    setImportPayload(text);
+  };
+
+  const handleExport = async () => {
+    const [
+      userStates,
+      threads,
+      messages,
+      threadSummaries,
+      personalSymbolMeanings,
+      symbolOccurrences,
+      appSettings,
+    ] = await Promise.all([
+      db.userNodeStates.toArray(),
+      db.threads.toArray(),
+      db.messages.toArray(),
+      db.threadSummaries.toArray(),
+      db.personalSymbolMeanings.toArray(),
+      db.symbolOccurrences.toArray(),
+      db.appSettings.toArray(),
+    ]);
+
+    const sanitizedSettings = appSettings.map((setting) => ({
+      ...setting,
+      openAiApiKey: undefined,
+    }));
+
+    const payload: ExportPayload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      userNodeStates: userStates,
+      threads,
+      messages,
+      threadSummaries,
+      personalSymbolMeanings,
+      symbolOccurrences,
+      appSettings: sanitizedSettings,
+    };
+
+    setExportPayload(JSON.stringify(payload, null, 2));
+  };
+
+  const handleImport = async () => {
+    setImportError(null);
+    let parsed: ExportPayload;
+    try {
+      parsed = JSON.parse(importPayload) as ExportPayload;
+    } catch (error) {
+      setImportError("Invalid JSON. Please check the payload.");
+      return;
+    }
+
+    const existingSettings = await db.appSettings.toArray();
+    const preservedApiKey = existingSettings.find((setting) => setting.key === "global")?.openAiApiKey;
+
+    const nextSettings =
+      parsed.appSettings?.map((setting) => ({
+        ...setting,
+        openAiApiKey: setting.openAiApiKey ?? preservedApiKey,
+      })) ?? [];
+
+    await db.transaction(
+      "rw",
+      db.userNodeStates,
+      db.threads,
+      db.messages,
+      db.threadSummaries,
+      db.personalSymbolMeanings,
+      db.symbolOccurrences,
+      db.appSettings,
+      async () => {
+        await db.userNodeStates.clear();
+        await db.threads.clear();
+        await db.messages.clear();
+        await db.threadSummaries.clear();
+        await db.personalSymbolMeanings.clear();
+        await db.symbolOccurrences.clear();
+        await db.appSettings.clear();
+
+        if (parsed.userNodeStates?.length) {
+          await db.userNodeStates.bulkAdd(parsed.userNodeStates);
+        }
+        if (parsed.threads?.length) {
+          await db.threads.bulkAdd(parsed.threads);
+        }
+        if (parsed.messages?.length) {
+          await db.messages.bulkAdd(parsed.messages);
+        }
+        if (parsed.threadSummaries?.length) {
+          await db.threadSummaries.bulkAdd(parsed.threadSummaries);
+        }
+        if (parsed.personalSymbolMeanings?.length) {
+          await db.personalSymbolMeanings.bulkAdd(parsed.personalSymbolMeanings);
+        }
+        if (parsed.symbolOccurrences?.length) {
+          await db.symbolOccurrences.bulkAdd(parsed.symbolOccurrences);
+        }
+        if (nextSettings.length) {
+          await db.appSettings.bulkAdd(nextSettings);
+        }
+      }
+    );
+
+    await ensureUserNodeStateRows();
+    await refreshData();
+  };
+
+  const handleReset = async () => {
+    await db.delete();
+    window.location.reload();
   };
 
   return (
@@ -337,6 +532,7 @@ export default function JourneyMapCanvas() {
             ))}
             {nodePoints.map((point) => {
               const style = STATUS_STYLES[point.status];
+              const isCurrent = point.node.id === currentNodeId;
               return (
                 <Group
                   key={point.node.id}
@@ -347,12 +543,25 @@ export default function JourneyMapCanvas() {
                   onMouseLeave={() => handleNodeHover(null)}
                   onClick={() => setSelectedNodeId(point.node.id)}
                 >
+                  {isCurrent && (
+                    <Circle
+                      radius={NODE_RADIUS + 8}
+                      stroke={CURRENT_RING.stroke}
+                      strokeWidth={CURRENT_RING.strokeWidth}
+                      shadowColor={CURRENT_RING.shadowColor}
+                      shadowBlur={CURRENT_RING.shadowBlur}
+                      shadowOpacity={CURRENT_RING.shadowOpacity}
+                    />
+                  )}
                   <Circle
                     radius={NODE_RADIUS}
                     fill={style.fill}
                     stroke={style.stroke}
                     strokeWidth={style.strokeWidth}
                     opacity={style.opacity}
+                    shadowColor={style.shadowColor}
+                    shadowBlur={style.shadowBlur}
+                    shadowOpacity={style.shadowOpacity}
                   />
                   <Text
                     text={point.node.title}
@@ -406,6 +615,19 @@ export default function JourneyMapCanvas() {
                 Close
               </button>
             </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={`rounded-full border px-3 py-1 ${STATUS_BADGE_STYLES[selectedStatus?.status ?? "locked"]}`}
+              >
+                {STATUS_LABELS[selectedStatus?.status ?? "locked"]}
+              </span>
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
+                Phase: {selectedNode.phase}
+              </span>
+              <span className="rounded-full border border-slate-700 px-3 py-1 text-slate-300">
+                Domain: {selectedNode.domain}
+              </span>
+            </div>
             <p className="text-sm text-slate-300">{selectedNode.description}</p>
             <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-4 text-sm">
               <div className="flex items-center justify-between">
@@ -414,9 +636,25 @@ export default function JourneyMapCanvas() {
                   {STATUS_LABELS[selectedStatus?.status ?? "locked"]}
                 </span>
               </div>
-              {selectedStatus?.status === "locked" && selectedStatus.unmetDependencies?.length ? (
-                <div className="mt-2 text-xs text-slate-400">
-                  Requires: {selectedStatus.unmetDependencies.join(", ")}
+              {selectedStatus?.status === "locked" && unmetDetails?.length ? (
+                <div className="mt-3 text-xs text-slate-400">
+                  <div className="font-semibold text-slate-300">Unmet dependencies</div>
+                  <ul className="mt-2 space-y-1">
+                    {unmetDetails.map((dep) => (
+                      <li key={dep.id} className="flex flex-col">
+                        <span className="text-slate-200">{dep.title}</span>
+                        <span className="text-[11px] text-slate-500">{dep.id}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {selectedStatus?.status === "completed" && selectedUserState?.completedAt ? (
+                <div className="mt-3 text-xs text-slate-400">
+                  Completed at:{" "}
+                  <span className="text-slate-200">
+                    {formatTimestamp(selectedUserState.completedAt)}
+                  </span>
                 </div>
               ) : null}
             </div>
@@ -425,11 +663,12 @@ export default function JourneyMapCanvas() {
                 href={`/chat?nodeId=${selectedNode.id}`}
                 className="rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-center text-sm font-medium text-slate-100 hover:bg-slate-700"
               >
-                Open node chat
+                Open chat
               </Link>
               <button
                 onClick={handleToggleCompleted}
-                className="rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-200 hover:bg-emerald-500/20"
+                className="rounded-lg border border-emerald-500/60 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-200 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-500"
+                disabled={selectedStatus?.status === "locked"}
               >
                 {selectedStatus?.status === "completed" ? "Mark incomplete" : "Mark completed"}
               </button>
@@ -439,6 +678,62 @@ export default function JourneyMapCanvas() {
               >
                 Set as current
               </button>
+              {selectedStatus?.status === "locked" ? (
+                <p className="text-xs text-slate-400">
+                  Complete dependencies before marking this node as finished.
+                </p>
+              ) : null}
+            </div>
+            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4 text-xs text-slate-200">
+              <div className="mb-3 text-sm font-semibold text-slate-100">Local data utilities</div>
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={handleExport}
+                    className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                  >
+                    Export JSON
+                  </button>
+                  <button
+                    onClick={handleImport}
+                    className="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                  >
+                    Import JSON
+                  </button>
+                  <button
+                    onClick={handleReset}
+                    className="rounded-full border border-rose-500/70 px-3 py-1 text-xs text-rose-200 hover:bg-rose-500/20"
+                  >
+                    Reset local data
+                  </button>
+                </div>
+                <label className="flex flex-col gap-2">
+                  <span className="text-[11px] uppercase tracking-wide text-slate-400">
+                    Import file
+                  </span>
+                  <input
+                    type="file"
+                    accept="application/json"
+                    onChange={handleImportFile}
+                    className="text-xs text-slate-300"
+                  />
+                </label>
+                {importError ? (
+                  <div className="text-xs text-rose-300">{importError}</div>
+                ) : null}
+                <textarea
+                  value={importPayload}
+                  onChange={(event) => setImportPayload(event.target.value)}
+                  placeholder="Paste exported JSON here for import."
+                  className="h-24 w-full rounded-lg border border-slate-700 bg-slate-950/70 p-2 text-[11px] text-slate-200"
+                />
+                <textarea
+                  value={exportPayload}
+                  readOnly
+                  placeholder="Exported JSON will appear here."
+                  className="h-24 w-full rounded-lg border border-slate-700 bg-slate-950/70 p-2 text-[11px] text-slate-200"
+                />
+              </div>
             </div>
           </aside>
         </>
