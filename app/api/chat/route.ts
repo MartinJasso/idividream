@@ -1,39 +1,20 @@
 import { NextResponse } from "next/server";
-
-type ChatHistoryItem = {
-  role: "user" | "assistant";
-  content: string;
-};
+import { buildChatContext } from "../../../src/lib/server/contextBuilder";
 
 type ChatRequest = {
   nodeId: string;
   threadId: string;
   userMessage: string;
-  nodeTitle?: string;
-  promptTemplate?: string;
-  status?: string;
+  history?: { role: "user" | "assistant"; content: string }[];
+  threadSummary?: { summary: string; keyMotifs: string[] } | null;
+  status?: "locked" | "available" | "next" | "completed" | "unknown";
   unmetDependencies?: string[];
   currentNodeId?: string | null;
   currentSpiralOrder?: number | null;
-  history?: ChatHistoryItem[];
+  nextNode?: { id: string; title: string } | null;
   apiKey?: string;
   model?: string;
 };
-
-function buildStateBlock(payload: ChatRequest) {
-  const unmet = payload.unmetDependencies?.length
-    ? payload.unmetDependencies.join(", ")
-    : "None";
-  return [
-    "Current state:",
-    `- nodeId: ${payload.nodeId}`,
-    `- nodeTitle: ${payload.nodeTitle ?? "Unknown"}`,
-    `- status: ${payload.status ?? "unknown"}`,
-    `- unmetDependencies: ${unmet}`,
-    `- currentNodeId: ${payload.currentNodeId ?? "unknown"}`,
-    `- currentSpiralOrder: ${payload.currentSpiralOrder ?? "unknown"}`,
-  ].join("\n");
-}
 
 export async function POST(request: Request) {
   const payload = (await request.json()) as ChatRequest;
@@ -50,22 +31,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing OpenAI API key." }, { status: 400 });
   }
 
-  const systemPrompt = [
-    payload.promptTemplate?.trim() || "You are a helpful assistant.",
-    "",
-    buildStateBlock(payload),
-  ].join("\n");
-
-  const history = (payload.history ?? []).filter((item) =>
-    item.role === "user" || item.role === "assistant"
-  );
+  const context = await buildChatContext({
+    nodeId: payload.nodeId,
+    threadId: payload.threadId,
+    userMessage: payload.userMessage,
+    history: payload.history ?? [],
+    threadSummary: payload.threadSummary ?? null,
+    status: payload.status,
+    unmetDependencies: payload.unmetDependencies,
+    currentNodeId: payload.currentNodeId ?? null,
+    currentSpiralOrder: payload.currentSpiralOrder ?? null,
+    nextNode: payload.nextNode ?? null,
+  });
 
   const body = {
     model: payload.model ?? "gpt-5-nano",
     messages: [
-      { role: "system", content: systemPrompt },
-      ...history.map((item) => ({ role: item.role, content: item.content })),
-      { role: "user", content: payload.userMessage },
+      { role: "system", content: context.system },
+      ...context.messages.map((item) => ({ role: item.role, content: item.content })),
     ],
   };
 
