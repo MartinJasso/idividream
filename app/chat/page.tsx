@@ -12,6 +12,7 @@ import type {
   Message,
   NodeDefinition,
   Thread,
+  ThreadSummary,
 } from "../../types";
 
 const STATUS_LABELS: Record<ComputedNodeStatus["status"], string> = {
@@ -37,10 +38,12 @@ export default function ChatPage() {
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [nextNode, setNextNode] = useState<{ id: string; title: string } | null>(null);
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [threadSummary, setThreadSummary] = useState<ThreadSummary | null>(null);
 
   const [composer, setComposer] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -70,6 +73,15 @@ export default function ChatPage() {
       setNode(nodeRow ?? null);
       setStatus(statusMap.get(nodeId) ?? null);
       setSettings(settingsRow ?? null);
+
+      const nextEntry = Array.from(statusMap.values()).find((entry) => entry.status === "next");
+      if (nextEntry) {
+        const nextNodeRow = await db.nodeDefinitions.get(nextEntry.nodeId);
+        if (!active) return;
+        setNextNode(nextNodeRow ? { id: nextNodeRow.id, title: nextNodeRow.title } : null);
+      } else {
+        setNextNode(null);
+      }
     };
 
     load();
@@ -103,6 +115,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (!selectedThreadId) {
       setMessages([]);
+      setThreadSummary(null);
       return;
     }
     let active = true;
@@ -115,6 +128,23 @@ export default function ChatPage() {
       setMessages(results);
     };
     loadMessages();
+    return () => {
+      active = false;
+    };
+  }, [selectedThreadId]);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      setThreadSummary(null);
+      return;
+    }
+    let active = true;
+    const loadSummary = async () => {
+      const summary = await db.threadSummaries.get(selectedThreadId);
+      if (!active) return;
+      setThreadSummary(summary ?? null);
+    };
+    loadSummary();
     return () => {
       active = false;
     };
@@ -156,6 +186,49 @@ export default function ChatPage() {
     });
   };
 
+  const shouldSummarize = (threadMessages: Message[]) => {
+    const totalChars = threadMessages.reduce((acc, msg) => acc + msg.content.length, 0);
+    return threadMessages.length > 40 || totalChars > 12000;
+  };
+
+  const requestSummarize = async (threadMessages: Message[]) => {
+    if (!node || !selectedThreadId) return;
+    const response = await fetch("/api/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        threadId: selectedThreadId,
+        nodeId: node.id,
+        nodeTitle: node.title,
+        promptTemplate: node.prompt_template,
+        status: status?.status ?? "locked",
+        unmetDependencies: status?.unmetDependencies ?? [],
+        currentNodeId: settings?.currentNodeId ?? null,
+        currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+        nextNode,
+        history: threadMessages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+        existingSummary: threadSummary,
+        apiKey: settings?.openAiApiKey,
+        model: settings?.modelChat,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload?.error ?? "Failed to summarize thread.");
+    }
+
+    const data = await response.json();
+    const summary = data?.threadSummary as ThreadSummary | undefined;
+    if (summary) {
+      await db.threadSummaries.put(summary);
+      setThreadSummary(summary);
+    }
+  };
+
   const handleSend = async () => {
     if (!node || !selectedThreadId || !composer.trim()) return;
     if (isSending) return;
@@ -195,7 +268,9 @@ export default function ChatPage() {
           unmetDependencies: status?.unmetDependencies ?? [],
           currentNodeId: settings?.currentNodeId ?? null,
           currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+          nextNode,
           history: historySnapshot,
+          threadSummary,
           apiKey: settings?.openAiApiKey,
           model: settings?.modelChat,
         }),
@@ -222,11 +297,31 @@ export default function ChatPage() {
       setMessages((prev) => [...prev, assistantMessage]);
       await db.messages.put(assistantMessage);
       await updateThreadTimestamp(selectedThreadId);
+      setIsSending(false);
+
+      const updatedMessages = [...messages, userMessage, assistantMessage];
+      if (shouldSummarize(updatedMessages)) {
+        void requestSummarize(updatedMessages).catch((error) => {
+          const message = error instanceof Error ? error.message : "Failed to summarize thread.";
+          setErrorMessage(message);
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to send message.";
       setErrorMessage(message);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleSummarizeNow = async () => {
+    if (!selectedThreadId || messages.length === 0) return;
+    setErrorMessage(null);
+    try {
+      await requestSummarize(messages);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to summarize thread.";
+      setErrorMessage(message);
     }
   };
 
@@ -330,6 +425,46 @@ export default function ChatPage() {
               </div>
             ) : (
               <div className="flex flex-col gap-4">
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-xs text-slate-200">
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold uppercase tracking-wide text-slate-400">
+                      Summary
+                    </div>
+                    <button
+                      onClick={handleSummarizeNow}
+                      className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 hover:bg-slate-700"
+                    >
+                      Summarize now
+                    </button>
+                  </div>
+                  {threadSummary ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-slate-300">
+                        View summary &amp; key motifs
+                      </summary>
+                      <div className="mt-2 whitespace-pre-wrap text-slate-200">
+                        {threadSummary.summary}
+                      </div>
+                      {threadSummary.keyMotifs?.length ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {threadSummary.keyMotifs.map((motif) => (
+                            <span
+                              key={motif}
+                              className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-200"
+                            >
+                              {motif}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Updated {new Date(threadSummary.updatedAt).toLocaleString()}
+                      </div>
+                    </details>
+                  ) : (
+                    <p className="mt-2 text-slate-400">No summary yet.</p>
+                  )}
+                </div>
                 {messages.map((message) => (
                   <div
                     key={message.id}

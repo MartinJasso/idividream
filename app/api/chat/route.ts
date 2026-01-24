@@ -1,53 +1,20 @@
 import { NextResponse } from "next/server";
-import { readFile } from "node:fs/promises";
-import type { NodesFile } from "../../../types";
+import { buildChatContext } from "../../../src/lib/server/contextBuilder";
 
 type ChatRequest = {
   nodeId: string;
   threadId: string;
   userMessage: string;
-  nodeTitle?: string;
-  promptTemplate?: string;
+  history?: { role: "user" | "assistant"; content: string }[];
+  threadSummary?: { summary: string; keyMotifs: string[] } | null;
   status?: "locked" | "available" | "next" | "completed" | "unknown";
   unmetDependencies?: string[];
   currentNodeId?: string | null;
   currentSpiralOrder?: number | null;
-  history?: { role: "user" | "assistant"; content: string }[];
+  nextNode?: { id: string; title: string } | null;
   apiKey?: string;
   model?: string;
 };
-
-type NodeSnapshot = {
-  title: string;
-  prompt_template: string;
-};
-
-async function getNodeSnapshot(nodeId: string): Promise<NodeSnapshot | null> {
-  try {
-    const raw = await readFile("public/nodes.json", "utf-8");
-    const data = JSON.parse(raw) as NodesFile;
-    const node = data.nodes.find((item) => item.id === nodeId);
-    if (!node) return null;
-    return { title: node.title, prompt_template: node.prompt_template };
-  } catch {
-    return null;
-  }
-}
-
-function buildStateBlock(payload: ChatRequest, nodeTitle?: string) {
-  const unmet = payload.unmetDependencies?.length
-    ? payload.unmetDependencies.join(", ")
-    : "None";
-  return [
-    "Current state:",
-    `- nodeId: ${payload.nodeId}`,
-    `- nodeTitle: ${nodeTitle ?? payload.nodeTitle ?? "Unknown"}`,
-    `- status: ${payload.status ?? "unknown"}`,
-    `- unmetDependencies: ${unmet}`,
-    `- currentNodeId: ${payload.currentNodeId ?? "unknown"}`,
-    `- currentSpiralOrder: ${payload.currentSpiralOrder ?? "unknown"}`,
-  ].join("\n");
-}
 
 export async function POST(request: Request) {
   const payload = (await request.json()) as ChatRequest;
@@ -64,26 +31,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing OpenAI API key." }, { status: 400 });
   }
 
-  const nodeSnapshot = await getNodeSnapshot(payload.nodeId);
-  const promptTemplate =
-    payload.promptTemplate?.trim() ||
-    nodeSnapshot?.prompt_template?.trim() ||
-    "You are a helpful assistant.";
-
-  const systemPrompt = [promptTemplate, "", buildStateBlock(payload, nodeSnapshot?.title)].join(
-    "\n"
-  );
-
-  const history = (payload.history ?? [])
-    .filter((item) => item.role === "user" || item.role === "assistant")
-    .slice(-20);
+  const context = await buildChatContext({
+    nodeId: payload.nodeId,
+    threadId: payload.threadId,
+    userMessage: payload.userMessage,
+    history: payload.history ?? [],
+    threadSummary: payload.threadSummary ?? null,
+    status: payload.status,
+    unmetDependencies: payload.unmetDependencies,
+    currentNodeId: payload.currentNodeId ?? null,
+    currentSpiralOrder: payload.currentSpiralOrder ?? null,
+    nextNode: payload.nextNode ?? null,
+  });
 
   const body = {
     model: payload.model ?? "gpt-5-nano",
     messages: [
-      { role: "system", content: systemPrompt },
-      ...history.map((item) => ({ role: item.role, content: item.content })),
-      { role: "user", content: payload.userMessage },
+      { role: "system", content: context.system },
+      ...context.messages.map((item) => ({ role: item.role, content: item.content })),
     ],
   };
 
