@@ -131,8 +131,8 @@ export interface AppSettings {
   currentNodeId?: string;      // where user "is" on the journey (optional)
   currentSpiralOrder?: number; // optional tracking
   openAiApiKey?: string;       // BYOK (store locally)
-  modelChat?: string;          // e.g. "gpt-5.2-thinking" (your chosen runtime model)
-  modelExtract?: string;       // e.g. "gpt-5.2-thinking" or a cheaper model later
+  modelChat?: string;          // e.g. "gpt-5-nano" (your chosen runtime model)
+  modelExtract?: string;       // e.g. "gpt-5-nano" or a cheaper model later
   modelSummarize?: string;
   updatedAt: string;           // ISO datetime
 }
