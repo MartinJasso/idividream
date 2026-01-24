@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
 
-export const runtime = "nodejs";
-
 type ChatHistoryItem = {
   role: "user" | "assistant";
   content: string;
@@ -39,30 +37,17 @@ function buildStateBlock(payload: ChatRequest) {
 
 export async function POST(request: Request) {
   const payload = (await request.json()) as ChatRequest;
-  const headerKey = request.headers.get("x-openai-api-key")?.trim();
 
   if (!payload?.nodeId || !payload?.threadId || !payload?.userMessage) {
     return NextResponse.json({ error: "Missing required fields." }, { status: 400 });
   }
 
-  const payloadKey = payload.apiKey?.trim();
-  const envServerKey = process.env.OPENAI_API_KEY?.trim();
-  const envPublicKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY?.trim();
-  const apiKey = [payloadKey, headerKey, envServerKey, envPublicKey].find((value) => value);
+  const apiKey =
+    payload.apiKey ||
+    process.env.OPENAI_API_KEY ||
+    process.env.NEXT_PUBLIC_OPENAI_API_KEY;
   if (!apiKey) {
-    console.warn("[chat api] Missing API key", {
-      hasPayloadKey: Boolean(payloadKey),
-      hasHeaderKey: Boolean(headerKey),
-      hasEnvServerKey: Boolean(envServerKey),
-      hasEnvPublicKey: Boolean(envPublicKey),
-    });
-    return NextResponse.json(
-      {
-        error:
-          "Missing OpenAI API key. Provide openAiApiKey in local settings or set OPENAI_API_KEY / NEXT_PUBLIC_OPENAI_API_KEY.",
-      },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Missing OpenAI API key." }, { status: 400 });
   }
 
   const systemPrompt = [
@@ -75,9 +60,8 @@ export async function POST(request: Request) {
     item.role === "user" || item.role === "assistant"
   );
 
-  const model = (payload.model ?? "gpt-5-nano").trim() || "gpt-5-nano";
   const body = {
-    model,
+    model: payload.model ?? "gpt-5-nano",
     messages: [
       { role: "system", content: systemPrompt },
       ...history.map((item) => ({ role: item.role, content: item.content })),
