@@ -37,7 +37,6 @@ export default function ChatPage() {
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [fallbackApiKey, setFallbackApiKey] = useState<string | null>(null);
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -71,35 +70,6 @@ export default function ChatPage() {
       setNode(nodeRow ?? null);
       setStatus(statusMap.get(nodeId) ?? null);
       setSettings(settingsRow ?? null);
-
-      if (!settingsRow?.openAiApiKey && typeof window !== "undefined") {
-        const envKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY?.trim();
-        const storedKey =
-          window.localStorage.getItem("openAiApiKey") ??
-          window.localStorage.getItem("OPENAI_API_KEY") ??
-          window.localStorage.getItem("NEXT_PUBLIC_OPENAI_API_KEY");
-        const resolvedKey = storedKey?.trim() || envKey;
-        if (resolvedKey) {
-          const updatedSettings: AppSettings = {
-            key: settingsRow?.key ?? "global",
-            currentNodeId: settingsRow?.currentNodeId,
-            currentSpiralOrder: settingsRow?.currentSpiralOrder,
-            openAiApiKey: resolvedKey,
-            modelChat: settingsRow?.modelChat ?? "gpt-5-nano",
-            modelExtract: settingsRow?.modelExtract ?? "gpt-5-nano",
-            modelSummarize: settingsRow?.modelSummarize ?? "gpt-5-nano",
-            updatedAt: nowIso(),
-          };
-          await db.appSettings.put(updatedSettings);
-          if (!active) return;
-          setSettings(updatedSettings);
-          setFallbackApiKey(resolvedKey);
-        } else {
-          setFallbackApiKey(null);
-        }
-      } else if (settingsRow?.openAiApiKey) {
-        setFallbackApiKey(settingsRow.openAiApiKey.trim());
-      }
     };
 
     load();
@@ -213,14 +183,9 @@ export default function ChatPage() {
 
     setIsSending(true);
     try {
-      const envKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY?.trim();
-      const apiKey = settings?.openAiApiKey ?? fallbackApiKey ?? envKey ?? undefined;
       const response = await fetch("/api/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { "x-openai-api-key": apiKey } : {}),
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           nodeId: node.id,
           threadId: selectedThreadId,
@@ -232,7 +197,7 @@ export default function ChatPage() {
           currentNodeId: settings?.currentNodeId ?? null,
           currentSpiralOrder: settings?.currentSpiralOrder ?? null,
           history: historySnapshot,
-          apiKey,
+          apiKey: settings?.openAiApiKey,
           model: settings?.modelChat,
         }),
       });
