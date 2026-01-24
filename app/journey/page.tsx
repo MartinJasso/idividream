@@ -4,14 +4,15 @@ import JourneyMapCanvas from "../../components/JourneyMapCanvas";
 
 const legendItems = [
   { label: "Completed", className: "bg-emerald-500" },
-  { label: "Next", className: "border border-yellow-400" },
+  { label: "Next", className: "border-2 border-yellow-300 shadow-[0_0_8px_rgba(250,204,21,0.5)]" },
   { label: "Available", className: "bg-sky-400" },
-  { label: "Locked", className: "bg-slate-600" },
+  { label: "Locked", className: "bg-slate-600 opacity-60" },
+  { label: "Current", className: "border-2 border-fuchsia-400" },
 ];
 
 export default function JourneyPage() {
   return (
-    <main className="flex h-screen flex-col">
+    <main className="flex flex-1 flex-col">
       <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 bg-slate-950/90 px-6 py-4 text-slate-100">
         <div>
           <p className="text-xs uppercase tracking-wide text-slate-400">Journey Map</p>
@@ -29,7 +30,7 @@ export default function JourneyPage() {
           ))}
         </div>
       </header>
-      <section className="relative flex-1">
+      <section className="relative flex-1 min-h-0">
         <JourneyMapCanvas />
       </section>
     </main>
