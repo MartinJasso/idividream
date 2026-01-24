@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { buildChatContext } from "../../../src/lib/server/contextBuilder";
+import { normalizeModel } from "../../../model";
 
 type ChatRequest = {
   nodeId: string;
@@ -45,7 +46,7 @@ export async function POST(request: Request) {
   });
 
   const body = {
-    model: payload.model ?? "gpt-5-nano",
+    model: normalizeModel(payload.model),
     messages: [
       { role: "system", content: context.system },
       ...context.messages.map((item) => ({ role: item.role, content: item.content })),
