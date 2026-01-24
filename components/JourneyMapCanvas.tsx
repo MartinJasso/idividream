@@ -602,7 +602,7 @@ export default function JourneyMapCanvas() {
             onClick={() => setSelectedNodeId(null)}
             aria-label="Close details"
           />
-          <aside className="fixed right-0 top-0 z-30 flex h-full w-full max-w-md flex-col gap-6 border-l border-slate-800 bg-slate-950/95 p-6 text-slate-100 shadow-2xl md:rounded-l-2xl">
+          <aside className="fixed right-0 top-0 z-30 flex h-full w-full max-w-md flex-col gap-6 overflow-y-auto border-l border-slate-800 bg-slate-950/95 p-6 text-slate-100 shadow-2xl md:rounded-l-2xl">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Node</p>
