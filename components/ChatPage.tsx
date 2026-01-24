@@ -1,21 +1,58 @@
 "use client";
 
-import { useSearchParams } from "next/navigation";
-import ChatPage from "../../components/ChatPage";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { db } from "../db";
+import { computeNodeStatuses } from "../journey";
+import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../seed";
+import type {
+  AppSettings,
+  ComputedNodeStatus,
+  Message,
+  NodeDefinition,
+  Thread,
+} from "../types";
 
-export default function ChatPageRoute() {
-  const searchParams = useSearchParams();
-  const nodeId = searchParams.get("nodeId");
+const STATUS_LABELS: Record<ComputedNodeStatus["status"], string> = {
+  completed: "Completed",
+  next: "Next",
+  available: "Available",
+  locked: "Locked",
+};
 
+type LogLevel = "info" | "success" | "warning" | "error";
+
+type LogEntry = {
+  id: string;
+  message: string;
+  level: LogLevel;
+  timestamp: string;
+};
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function formatThreadTitle(nodeTitle: string) {
+  const date = new Date();
+  return `${nodeTitle} – ${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+}
+
+interface ChatPageProps {
+  nodeId: string | null;
+}
+
+export default function ChatPage({ nodeId }: ChatPageProps) {
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [nextNode, setNextNode] = useState<{ id: string; title: string } | null>(null);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [modelChatInput, setModelChatInput] = useState("");
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [threadSummary, setThreadSummary] = useState<ThreadSummary | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const [composer, setComposer] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -23,6 +60,8 @@ export default function ChatPageRoute() {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const seededRef = useRef(false);
+
+  const hasApiKey = Boolean(apiKeyInput.trim() || settings?.openAiApiKey);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -45,15 +84,6 @@ export default function ChatPageRoute() {
       setNode(nodeRow ?? null);
       setStatus(statusMap.get(nodeId) ?? null);
       setSettings(settingsRow ?? null);
-
-      const nextEntry = Array.from(statusMap.values()).find((entry) => entry.status === "next");
-      if (nextEntry) {
-        const nextNodeRow = await db.nodeDefinitions.get(nextEntry.nodeId);
-        if (!active) return;
-        setNextNode(nextNodeRow ? { id: nextNodeRow.id, title: nextNodeRow.title } : null);
-      } else {
-        setNextNode(null);
-      }
     };
 
     load();
@@ -62,6 +92,12 @@ export default function ChatPageRoute() {
       active = false;
     };
   }, [nodeId]);
+
+  useEffect(() => {
+    if (!settings) return;
+    setApiKeyInput(settings.openAiApiKey ?? "");
+    setModelChatInput(settings.modelChat ?? "");
+  }, [settings]);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -87,7 +123,6 @@ export default function ChatPageRoute() {
   useEffect(() => {
     if (!selectedThreadId) {
       setMessages([]);
-      setThreadSummary(null);
       return;
     }
     let active = true;
@@ -106,25 +141,20 @@ export default function ChatPageRoute() {
   }, [selectedThreadId]);
 
   useEffect(() => {
-    if (!selectedThreadId) {
-      setThreadSummary(null);
-      return;
-    }
-    let active = true;
-    const loadSummary = async () => {
-      const summary = await db.threadSummaries.get(selectedThreadId);
-      if (!active) return;
-      setThreadSummary(summary ?? null);
-    };
-    loadSummary();
-    return () => {
-      active = false;
-    };
-  }, [selectedThreadId]);
-
-  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const appendLog = (level: LogLevel, message: string) => {
+    setLogs((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        level,
+        message,
+        timestamp: nowIso(),
+      },
+    ]);
+  };
 
   const selectedThread = useMemo(
     () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
@@ -158,47 +188,24 @@ export default function ChatPageRoute() {
     });
   };
 
-  const shouldSummarize = (threadMessages: Message[]) => {
-    const totalChars = threadMessages.reduce((acc, msg) => acc + msg.content.length, 0);
-    return threadMessages.length > 40 || totalChars > 12000;
-  };
-
-  const requestSummarize = async (threadMessages: Message[]) => {
-    if (!node || !selectedThreadId) return;
-    const response = await fetch("/api/summarize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        threadId: selectedThreadId,
-        nodeId: node.id,
-        nodeTitle: node.title,
-        promptTemplate: node.prompt_template,
-        status: status?.status ?? "locked",
-        unmetDependencies: status?.unmetDependencies ?? [],
-        currentNodeId: settings?.currentNodeId ?? null,
-        currentSpiralOrder: settings?.currentSpiralOrder ?? null,
-        nextNode,
-        history: threadMessages.map((message) => ({
-          role: message.role,
-          content: message.content,
-        })),
-        existingSummary: threadSummary,
-        apiKey: settings?.openAiApiKey,
-        model: settings?.modelChat,
-      }),
-    });
-
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload?.error ?? "Failed to summarize thread.");
-    }
-
-    const data = await response.json();
-    const summary = data?.threadSummary as ThreadSummary | undefined;
-    if (summary) {
-      await db.threadSummaries.put(summary);
-      setThreadSummary(summary);
-    }
+  const handleSaveSettings = async () => {
+    const trimmedKey = apiKeyInput.trim();
+    const trimmedModel = modelChatInput.trim();
+    const updated: AppSettings = {
+      key: "global",
+      currentNodeId: settings?.currentNodeId ?? undefined,
+      currentSpiralOrder: settings?.currentSpiralOrder ?? undefined,
+      openAiApiKey: trimmedKey ? trimmedKey : undefined,
+      modelChat: trimmedModel ? trimmedModel : undefined,
+      modelExtract: settings?.modelExtract,
+      modelSummarize: settings?.modelSummarize,
+      updatedAt: nowIso(),
+    };
+    await db.appSettings.put(updated);
+    setSettings(updated);
+    setApiKeyInput(trimmedKey);
+    setModelChatInput(trimmedModel);
+    appendLog("success", "Settings saved.");
   };
 
   const handleSend = async () => {
@@ -208,6 +215,19 @@ export default function ChatPageRoute() {
     const messageText = composer.trim();
     setComposer("");
     setErrorMessage(null);
+
+    const historySnapshot = messages.slice(-20).map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+
+    const effectiveApiKey = apiKeyInput.trim() || settings?.openAiApiKey;
+    if (!effectiveApiKey) {
+      appendLog(
+        "warning",
+        "No API key saved yet. Add one in the settings bar to authenticate requests."
+      );
+    }
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -222,11 +242,8 @@ export default function ChatPageRoute() {
     await updateThreadTimestamp(selectedThreadId);
 
     setIsSending(true);
+    appendLog("info", "Sending message to the assistant.");
     try {
-      const historySnapshot = [...messages, userMessage].map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -240,10 +257,8 @@ export default function ChatPageRoute() {
           unmetDependencies: status?.unmetDependencies ?? [],
           currentNodeId: settings?.currentNodeId ?? null,
           currentSpiralOrder: settings?.currentSpiralOrder ?? null,
-          nextNode,
           history: historySnapshot,
-          threadSummary,
-          apiKey: settings?.openAiApiKey,
+          apiKey: effectiveApiKey,
           model: settings?.modelChat,
         }),
       });
@@ -269,31 +284,13 @@ export default function ChatPageRoute() {
       setMessages((prev) => [...prev, assistantMessage]);
       await db.messages.put(assistantMessage);
       await updateThreadTimestamp(selectedThreadId);
-      setIsSending(false);
-
-      const updatedMessages = [...messages, userMessage, assistantMessage];
-      if (shouldSummarize(updatedMessages)) {
-        void requestSummarize(updatedMessages).catch((error) => {
-          const message = error instanceof Error ? error.message : "Failed to summarize thread.";
-          setErrorMessage(message);
-        });
-      }
+      appendLog("success", "Assistant response received.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to send message.";
       setErrorMessage(message);
+      appendLog("error", message);
     } finally {
       setIsSending(false);
-    }
-  };
-
-  const handleSummarizeNow = async () => {
-    if (!selectedThreadId || messages.length === 0) return;
-    setErrorMessage(null);
-    try {
-      await requestSummarize(messages);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to summarize thread.";
-      setErrorMessage(message);
     }
   };
 
@@ -351,6 +348,50 @@ export default function ChatPageRoute() {
         </div>
       )}
 
+      {!hasApiKey && (
+        <div className="border-b border-sky-500/30 bg-sky-500/10 px-6 py-3 text-sm text-sky-100">
+          Add your OpenAI API key to enable authenticated chat requests.
+        </div>
+      )}
+
+      <div className="border-b border-slate-800 bg-slate-950/70 px-6 py-4">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="flex-1">
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              OpenAI API Key
+            </label>
+            <input
+              type="password"
+              value={apiKeyInput}
+              onChange={(event) => setApiKeyInput(event.target.value)}
+              placeholder="sk-..."
+              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+          <div className="w-56">
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Chat model
+            </label>
+            <input
+              value={modelChatInput}
+              onChange={(event) => setModelChatInput(event.target.value)}
+              placeholder="gpt-5-nano"
+              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+          <button
+            onClick={handleSaveSettings}
+            className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30"
+          >
+            Save settings
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-slate-400">
+          Settings are stored locally in your browser. The API key never leaves your device
+          except to authenticate chat requests.
+        </p>
+      </div>
+
       <section className="flex flex-1 overflow-hidden">
         <aside className="flex w-72 flex-col border-r border-slate-800 bg-slate-950/80 p-4">
           <div className="flex items-center justify-between">
@@ -387,6 +428,38 @@ export default function ChatPageRoute() {
               </ul>
             )}
           </div>
+          <div className="mt-6 border-t border-slate-800 pt-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Activity log
+            </h3>
+            <div className="mt-3 max-h-48 space-y-2 overflow-y-auto text-xs">
+              {logs.length === 0 ? (
+                <p className="text-slate-500">No activity yet.</p>
+              ) : (
+                logs.slice(-12).map((log) => (
+                  <div key={log.id} className="rounded-md border border-slate-800 bg-slate-900/40 p-2">
+                    <div className="flex items-center justify-between text-[10px] text-slate-500">
+                      <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      <span
+                        className={`uppercase ${
+                          log.level === "error"
+                            ? "text-rose-300"
+                            : log.level === "warning"
+                              ? "text-amber-300"
+                              : log.level === "success"
+                                ? "text-emerald-300"
+                                : "text-slate-400"
+                        }`}
+                      >
+                        {log.level}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-slate-200">{log.message}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </aside>
 
         <div className="flex flex-1 flex-col">
@@ -397,46 +470,6 @@ export default function ChatPageRoute() {
               </div>
             ) : (
               <div className="flex flex-col gap-4">
-                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-xs text-slate-200">
-                  <div className="flex items-center justify-between">
-                    <div className="font-semibold uppercase tracking-wide text-slate-400">
-                      Summary
-                    </div>
-                    <button
-                      onClick={handleSummarizeNow}
-                      className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 hover:bg-slate-700"
-                    >
-                      Summarize now
-                    </button>
-                  </div>
-                  {threadSummary ? (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-slate-300">
-                        View summary &amp; key motifs
-                      </summary>
-                      <div className="mt-2 whitespace-pre-wrap text-slate-200">
-                        {threadSummary.summary}
-                      </div>
-                      {threadSummary.keyMotifs?.length ? (
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {threadSummary.keyMotifs.map((motif) => (
-                            <span
-                              key={motif}
-                              className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[11px] text-slate-200"
-                            >
-                              {motif}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                      <div className="mt-2 text-[11px] text-slate-500">
-                        Updated {new Date(threadSummary.updatedAt).toLocaleString()}
-                      </div>
-                    </details>
-                  ) : (
-                    <p className="mt-2 text-slate-400">No summary yet.</p>
-                  )}
-                </div>
                 {messages.map((message) => (
                   <div
                     key={message.id}
