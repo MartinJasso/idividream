@@ -20,6 +20,15 @@ const STATUS_LABELS: Record<ComputedNodeStatus["status"], string> = {
   locked: "Locked",
 };
 
+type LogLevel = "info" | "success" | "warning" | "error";
+
+type LogEntry = {
+  id: string;
+  message: string;
+  level: LogLevel;
+  timestamp: string;
+};
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -37,10 +46,13 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [modelChatInput, setModelChatInput] = useState("");
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const [composer, setComposer] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -48,6 +60,8 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const seededRef = useRef(false);
+
+  const hasApiKey = Boolean(apiKeyInput.trim() || settings?.openAiApiKey);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -78,6 +92,12 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
       active = false;
     };
   }, [nodeId]);
+
+  useEffect(() => {
+    if (!settings) return;
+    setApiKeyInput(settings.openAiApiKey ?? "");
+    setModelChatInput(settings.modelChat ?? "");
+  }, [settings]);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -124,6 +144,18 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const appendLog = (level: LogLevel, message: string) => {
+    setLogs((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        level,
+        message,
+        timestamp: nowIso(),
+      },
+    ]);
+  };
+
   const selectedThread = useMemo(
     () => threads.find((thread) => thread.id === selectedThreadId) ?? null,
     [threads, selectedThreadId]
@@ -156,6 +188,26 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
     });
   };
 
+  const handleSaveSettings = async () => {
+    const trimmedKey = apiKeyInput.trim();
+    const trimmedModel = modelChatInput.trim();
+    const updated: AppSettings = {
+      key: "global",
+      currentNodeId: settings?.currentNodeId ?? undefined,
+      currentSpiralOrder: settings?.currentSpiralOrder ?? undefined,
+      openAiApiKey: trimmedKey ? trimmedKey : undefined,
+      modelChat: trimmedModel ? trimmedModel : undefined,
+      modelExtract: settings?.modelExtract,
+      modelSummarize: settings?.modelSummarize,
+      updatedAt: nowIso(),
+    };
+    await db.appSettings.put(updated);
+    setSettings(updated);
+    setApiKeyInput(trimmedKey);
+    setModelChatInput(trimmedModel);
+    appendLog("success", "Settings saved.");
+  };
+
   const handleSend = async () => {
     if (!node || !selectedThreadId || !composer.trim()) return;
     if (isSending) return;
@@ -168,6 +220,14 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
       role: message.role,
       content: message.content,
     }));
+
+    const effectiveApiKey = apiKeyInput.trim() || settings?.openAiApiKey;
+    if (!effectiveApiKey) {
+      appendLog(
+        "warning",
+        "No API key saved yet. Add one in the settings bar to authenticate requests."
+      );
+    }
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -182,6 +242,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
     await updateThreadTimestamp(selectedThreadId);
 
     setIsSending(true);
+    appendLog("info", "Sending message to the assistant.");
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -197,7 +258,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
           currentNodeId: settings?.currentNodeId ?? null,
           currentSpiralOrder: settings?.currentSpiralOrder ?? null,
           history: historySnapshot,
-          apiKey: settings?.openAiApiKey,
+          apiKey: effectiveApiKey,
           model: settings?.modelChat,
         }),
       });
@@ -223,9 +284,11 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
       setMessages((prev) => [...prev, assistantMessage]);
       await db.messages.put(assistantMessage);
       await updateThreadTimestamp(selectedThreadId);
+      appendLog("success", "Assistant response received.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to send message.";
       setErrorMessage(message);
+      appendLog("error", message);
     } finally {
       setIsSending(false);
     }
@@ -285,6 +348,50 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
         </div>
       )}
 
+      {!hasApiKey && (
+        <div className="border-b border-sky-500/30 bg-sky-500/10 px-6 py-3 text-sm text-sky-100">
+          Add your OpenAI API key to enable authenticated chat requests.
+        </div>
+      )}
+
+      <div className="border-b border-slate-800 bg-slate-950/70 px-6 py-4">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="flex-1">
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              OpenAI API Key
+            </label>
+            <input
+              type="password"
+              value={apiKeyInput}
+              onChange={(event) => setApiKeyInput(event.target.value)}
+              placeholder="sk-..."
+              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+          <div className="w-56">
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+              Chat model
+            </label>
+            <input
+              value={modelChatInput}
+              onChange={(event) => setModelChatInput(event.target.value)}
+              placeholder="gpt-5-nano"
+              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+          <button
+            onClick={handleSaveSettings}
+            className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30"
+          >
+            Save settings
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-slate-400">
+          Settings are stored locally in your browser. The API key never leaves your device
+          except to authenticate chat requests.
+        </p>
+      </div>
+
       <section className="flex flex-1 overflow-hidden">
         <aside className="flex w-72 flex-col border-r border-slate-800 bg-slate-950/80 p-4">
           <div className="flex items-center justify-between">
@@ -320,6 +427,38 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
                 ))}
               </ul>
             )}
+          </div>
+          <div className="mt-6 border-t border-slate-800 pt-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Activity log
+            </h3>
+            <div className="mt-3 max-h-48 space-y-2 overflow-y-auto text-xs">
+              {logs.length === 0 ? (
+                <p className="text-slate-500">No activity yet.</p>
+              ) : (
+                logs.slice(-12).map((log) => (
+                  <div key={log.id} className="rounded-md border border-slate-800 bg-slate-900/40 p-2">
+                    <div className="flex items-center justify-between text-[10px] text-slate-500">
+                      <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      <span
+                        className={`uppercase ${
+                          log.level === "error"
+                            ? "text-rose-300"
+                            : log.level === "warning"
+                              ? "text-amber-300"
+                              : log.level === "success"
+                                ? "text-emerald-300"
+                                : "text-slate-400"
+                        }`}
+                      >
+                        {log.level}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-slate-200">{log.message}</p>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </aside>
 
