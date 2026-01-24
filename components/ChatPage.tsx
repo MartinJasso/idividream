@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { db } from "../db";
 import { computeNodeStatuses } from "../journey";
-import { DEFAULT_MODEL, normalizeModel } from "../model";
+import { normalizeModel } from "../model";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../seed";
 import type {
   AppSettings,
@@ -47,8 +47,6 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [modelChatInput, setModelChatInput] = useState("");
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -62,7 +60,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const seededRef = useRef(false);
 
-  const hasApiKey = Boolean(apiKeyInput.trim() || settings?.openAiApiKey);
+  const hasApiKey = Boolean(settings?.openAiApiKey);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -93,12 +91,6 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
       active = false;
     };
   }, [nodeId]);
-
-  useEffect(() => {
-    if (!settings) return;
-    setApiKeyInput(settings.openAiApiKey ?? "");
-    setModelChatInput(normalizeModel(settings.modelChat));
-  }, [settings]);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -189,26 +181,6 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
     });
   };
 
-  const handleSaveSettings = async () => {
-    const trimmedKey = apiKeyInput.trim();
-    const normalizedModel = normalizeModel(modelChatInput);
-    const updated: AppSettings = {
-      key: "global",
-      currentNodeId: settings?.currentNodeId ?? undefined,
-      currentSpiralOrder: settings?.currentSpiralOrder ?? undefined,
-      openAiApiKey: trimmedKey ? trimmedKey : undefined,
-      modelChat: normalizedModel,
-      modelExtract: settings?.modelExtract,
-      modelSummarize: settings?.modelSummarize,
-      updatedAt: nowIso(),
-    };
-    await db.appSettings.put(updated);
-    setSettings(updated);
-    setApiKeyInput(trimmedKey);
-    setModelChatInput(normalizedModel);
-    appendLog("success", "Settings saved.");
-  };
-
   const handleSend = async () => {
     if (!node || !selectedThreadId || !composer.trim()) return;
     if (isSending) return;
@@ -222,11 +194,11 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
       content: message.content,
     }));
 
-    const effectiveApiKey = apiKeyInput.trim() || settings?.openAiApiKey;
+    const effectiveApiKey = settings?.openAiApiKey;
     if (!effectiveApiKey) {
       appendLog(
         "warning",
-        "No API key saved yet. Add one in the settings bar to authenticate requests."
+        "No API key saved yet. Add one in Settings to authenticate requests."
       );
     }
 
@@ -260,7 +232,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
           currentSpiralOrder: settings?.currentSpiralOrder ?? null,
           history: historySnapshot,
           apiKey: effectiveApiKey,
-          model: normalizeModel(settings?.modelChat ?? modelChatInput),
+          model: normalizeModel(settings?.modelChat),
         }),
       });
 
@@ -333,6 +305,12 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
             {STATUS_LABELS[status?.status ?? "locked"]}
           </span>
           <Link
+            href="/settings"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-100 hover:bg-slate-700"
+          >
+            Settings
+          </Link>
+          <Link
             href="/journey"
             className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-100 hover:bg-slate-700"
           >
@@ -351,46 +329,23 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
 
       {!hasApiKey && (
         <div className="border-b border-sky-500/30 bg-sky-500/10 px-6 py-3 text-sm text-sky-100">
-          Add your OpenAI API key to enable authenticated chat requests.
+          Add your OpenAI API key in Settings to enable authenticated chat requests.
         </div>
       )}
 
-      <div className="border-b border-slate-800 bg-slate-950/70 px-6 py-4">
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="flex-1">
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-              OpenAI API Key
-            </label>
-            <input
-              type="password"
-              value={apiKeyInput}
-              onChange={(event) => setApiKeyInput(event.target.value)}
-              placeholder="sk-..."
-              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
-            />
+      <div className="border-b border-slate-800 bg-slate-950/70 px-6 py-4 text-sm text-slate-200">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            Settings are stored locally in your browser. Update your API key and model in the
+            Settings page.
           </div>
-          <div className="w-56">
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-              Chat model
-            </label>
-            <input
-              value={modelChatInput}
-              onChange={(event) => setModelChatInput(event.target.value)}
-              placeholder={DEFAULT_MODEL}
-              className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
-            />
-          </div>
-          <button
-            onClick={handleSaveSettings}
-            className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30"
+          <Link
+            href="/settings"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-slate-100 hover:bg-slate-700"
           >
-            Save settings
-          </button>
+            Open settings
+          </Link>
         </div>
-        <p className="mt-2 text-xs text-slate-400">
-          Settings are stored locally in your browser. The API key never leaves your device
-          except to authenticate chat requests.
-        </p>
       </div>
 
       <section className="flex flex-1 overflow-hidden">

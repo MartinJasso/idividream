@@ -677,6 +677,12 @@ export default function ChatPageRoute() {
             {STATUS_LABELS[status?.status ?? "locked"]}
           </span>
           <Link
+            href="/settings"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-100 hover:bg-slate-700"
+          >
+            Settings
+          </Link>
+          <Link
             href="/journey"
             className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-100 hover:bg-slate-700"
           >
