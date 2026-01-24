@@ -112,7 +112,6 @@ export interface PersonalSymbolMeaning {
   linkedDomains?: string[];         // tags/domains
   originMessageIds?: string[];      // evidence pointers
   confidence?: number;              // 0..1
-  suggestedMeanings?: string[];
   lastUpdated: string;              // ISO datetime
 }
 
@@ -124,27 +123,6 @@ export interface SymbolOccurrence {
   contextSnippet: string;
   emotionTags?: string[];
   createdAt: string;   // ISO datetime
-}
-
-export interface DreamScene {
-  idx: number;
-  summary: string;
-  emotions: string[];
-}
-
-export interface DreamSymbol {
-  label: string;
-  category?: string;
-  contextSnippet: string;
-  emotionTags?: string[];
-  suggestedMeaning?: string;
-}
-
-export interface DreamExtraction {
-  scenes: DreamScene[];
-  symbols: DreamSymbol[];
-  hypotheses: string[];
-  question: string;
 }
 
 // App settings (single-user local-first)

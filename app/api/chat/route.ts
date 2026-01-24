@@ -1,42 +1,53 @@
 import { NextResponse } from "next/server";
-import {
-  buildChatContext,
-  type ChatHistoryItem,
-} from "../../../src/lib/server/contextBuilder";
-import {
-  buildSummarizePrompt,
-  normalizeSummaryResult,
-  safeParseSummary,
-  shouldSummarize,
-} from "../../../src/lib/server/summarization";
-import type { ThreadSummary } from "../../../types";
+import { readFile } from "node:fs/promises";
+import type { NodesFile } from "../../../types";
 
 type ChatRequest = {
   nodeId: string;
   threadId: string;
   userMessage: string;
-  mode?: "chat" | "dream";
-  node?: {
-    id: string;
-    title: string;
-    prompt_template: string;
-    domain?: string;
-    tags?: string[];
-  };
-  status?: {
-    status: "locked" | "available" | "next" | "completed";
-    unmetDependencies?: string[];
-  };
-  settings?: {
-    currentNodeId?: string | null;
-    currentSpiralOrder?: number | null;
-  };
-  threadSummary?: ThreadSummary | null;
-  history?: ChatHistoryItem[];
+  nodeTitle?: string;
+  promptTemplate?: string;
+  status?: "locked" | "available" | "next" | "completed" | "unknown";
+  unmetDependencies?: string[];
+  currentNodeId?: string | null;
+  currentSpiralOrder?: number | null;
+  history?: { role: "user" | "assistant"; content: string }[];
   apiKey?: string;
   model?: string;
-  modelSummarize?: string;
 };
+
+type NodeSnapshot = {
+  title: string;
+  prompt_template: string;
+};
+
+async function getNodeSnapshot(nodeId: string): Promise<NodeSnapshot | null> {
+  try {
+    const raw = await readFile("public/nodes.json", "utf-8");
+    const data = JSON.parse(raw) as NodesFile;
+    const node = data.nodes.find((item) => item.id === nodeId);
+    if (!node) return null;
+    return { title: node.title, prompt_template: node.prompt_template };
+  } catch {
+    return null;
+  }
+}
+
+function buildStateBlock(payload: ChatRequest, nodeTitle?: string) {
+  const unmet = payload.unmetDependencies?.length
+    ? payload.unmetDependencies.join(", ")
+    : "None";
+  return [
+    "Current state:",
+    `- nodeId: ${payload.nodeId}`,
+    `- nodeTitle: ${nodeTitle ?? payload.nodeTitle ?? "Unknown"}`,
+    `- status: ${payload.status ?? "unknown"}`,
+    `- unmetDependencies: ${unmet}`,
+    `- currentNodeId: ${payload.currentNodeId ?? "unknown"}`,
+    `- currentSpiralOrder: ${payload.currentSpiralOrder ?? "unknown"}`,
+  ].join("\n");
+}
 
 export async function POST(request: Request) {
   const payload = (await request.json()) as ChatRequest;
@@ -53,79 +64,28 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing OpenAI API key." }, { status: 400 });
   }
 
-  const context = buildChatContext({
-    nodeId: payload.nodeId,
-    threadId: payload.threadId,
-    userMessage: payload.userMessage,
-    mode: payload.mode ?? "chat",
-    node: payload.node,
-    status: payload.status ?? null,
-    settings: payload.settings ?? null,
-    threadSummary: payload.threadSummary ?? null,
-    history: payload.history ?? [],
-  });
+  const nodeSnapshot = await getNodeSnapshot(payload.nodeId);
+  const promptTemplate =
+    payload.promptTemplate?.trim() ||
+    nodeSnapshot?.prompt_template?.trim() ||
+    "You are a helpful assistant.";
+
+  const systemPrompt = [promptTemplate, "", buildStateBlock(payload, nodeSnapshot?.title)].join(
+    "\n"
+  );
+
+  const history = (payload.history ?? [])
+    .filter((item) => item.role === "user" || item.role === "assistant")
+    .slice(-20);
 
   const body = {
     model: payload.model ?? "gpt-5-nano",
     messages: [
-      { role: "system", content: context.systemPrompt },
-      ...(context.assistantSummary
-        ? [{ role: "assistant", content: context.assistantSummary }]
-        : []),
-      ...context.history.map((item) => ({ role: item.role, content: item.content })),
-      { role: "user", content: context.userMessage },
+      { role: "system", content: systemPrompt },
+      ...history.map((item) => ({ role: item.role, content: item.content })),
+      { role: "user", content: payload.userMessage },
     ],
   };
-
-  let updatedSummary: ThreadSummary | null = null;
-  const history = payload.history ?? [];
-  if (shouldSummarize(history)) {
-    const keepCount = 20;
-    const olderMessages = history.slice(0, Math.max(0, history.length - keepCount));
-    if (olderMessages.length > 0) {
-      const prompt = buildSummarizePrompt({
-        nodeId: payload.nodeId,
-        nodeTitle: payload.node?.title,
-        promptTemplate: payload.node?.prompt_template,
-        statusLabel: payload.status?.status,
-        unmetDependencies: payload.status?.unmetDependencies,
-        currentNodeId: payload.settings?.currentNodeId ?? null,
-        currentSpiralOrder: payload.settings?.currentSpiralOrder ?? null,
-        existingSummary: payload.threadSummary ?? null,
-        messages: olderMessages,
-      });
-
-      const summarizeResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: payload.modelSummarize ?? payload.model ?? "gpt-5-nano",
-          messages: [
-            { role: "system", content: prompt.system },
-            { role: "user", content: prompt.user },
-          ],
-        }),
-      });
-
-      if (summarizeResponse.ok) {
-        const summarizeData = await summarizeResponse.json();
-        const summarizeText = summarizeData?.choices?.[0]?.message?.content ?? "";
-        const parsed = safeParseSummary(summarizeText);
-        const normalized = parsed ? normalizeSummaryResult(parsed) : null;
-        if (normalized) {
-          updatedSummary = {
-            threadId: payload.threadId,
-            summary: normalized.summary,
-            keyMotifs: normalized.keyMotifs,
-            updatedAt: new Date().toISOString(),
-          };
-        }
-      }
-    }
-  }
 
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -145,5 +105,5 @@ export async function POST(request: Request) {
   const data = await response.json();
   const assistant = data?.choices?.[0]?.message?.content ?? "";
 
-  return NextResponse.json({ assistant, threadSummary: updatedSummary });
+  return NextResponse.json({ assistant });
 }
