@@ -1,15 +1,10 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import ChatPage from "../../components/ChatPage";
-import { computeNodeStatuses, getGlobalSettings } from "../../journey";
-import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { db } from "../../db";
-import { computeNodeStatuses } from "../../journey";
+import { computeNodeStatuses, getGlobalSettings } from "../../journey";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
 import type {
   AppSettings,
@@ -40,51 +35,6 @@ export default function ChatPageRoute() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const nodeId = searchParams.get("nodeId");
-  const seededRef = useRef(false);
-
-  useEffect(() => {
-    if (nodeId) return;
-    let active = true;
-
-    const resolveNode = async () => {
-      if (!seededRef.current) {
-        seededRef.current = true;
-        await seedNodeDefinitionsFromUrl("/nodes.json");
-        await ensureUserNodeStateRows();
-      }
-
-      const [settings, statusMap] = await Promise.all([
-        getGlobalSettings(),
-        computeNodeStatuses(),
-      ]);
-
-      if (!active) return;
-      const nextNodeId =
-        settings?.currentNodeId ??
-        Array.from(statusMap.values()).find((status) => status.status === "next")
-          ?.nodeId ??
-        null;
-
-      if (nextNodeId) {
-        router.replace(`/chat?nodeId=${nextNodeId}`);
-      }
-    };
-
-    resolveNode();
-
-    return () => {
-      active = false;
-    };
-  }, [nodeId, router]);
-
-  if (!nodeId) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-sm text-slate-300">
-        Resolving your current node…
-      </div>
-    );
-  }
-
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -101,6 +51,41 @@ export default function ChatPageRoute() {
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const seededRef = useRef(false);
+
+  useEffect(() => {
+    if (nodeId) return;
+    let active = true;
+
+    const resolveNode = async () => {
+      if (!seededRef.current) {
+        seededRef.current = true;
+        await seedNodeDefinitionsFromUrl("/nodes.json");
+        await ensureUserNodeStateRows();
+      }
+
+      const [settingsRow, statusMap] = await Promise.all([
+        getGlobalSettings(),
+        computeNodeStatuses(),
+      ]);
+
+      if (!active) return;
+      const nextNodeId =
+        settingsRow?.currentNodeId ??
+        Array.from(statusMap.values()).find((statusRow) => statusRow.status === "next")
+          ?.nodeId ??
+        null;
+
+      if (nextNodeId) {
+        router.replace(`/chat?nodeId=${nextNodeId}`);
+      }
+    };
+
+    resolveNode();
+
+    return () => {
+      active = false;
+    };
+  }, [nodeId, router]);
 
   useEffect(() => {
     if (!nodeId) return;
@@ -384,20 +369,9 @@ export default function ChatPageRoute() {
 
   if (!nodeId) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-6">
-        <div className="max-w-lg rounded-2xl border border-slate-800 bg-slate-900/60 p-6 text-center">
-          <h1 className="text-2xl font-semibold">Missing node selection</h1>
-          <p className="mt-2 text-sm text-slate-300">
-            Please return to the journey map and open a node chat.
-          </p>
-          <Link
-            className="mt-4 inline-flex items-center justify-center rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-100 hover:bg-slate-700"
-            href="/journey"
-          >
-            Back to journey
-          </Link>
-        </div>
-      </main>
+      <div className="flex flex-1 items-center justify-center text-sm text-slate-300">
+        Resolving your current node…
+      </div>
     );
   }
 
