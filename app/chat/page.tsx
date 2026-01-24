@@ -4,14 +4,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { db } from "../../db";
-import { computeNodeStatuses } from "../../journey";
+import { computeNodeStatuses, getRelevantNextNodes } from "../../journey";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
 import type {
   AppSettings,
   ComputedNodeStatus,
+  DreamExtraction,
   Message,
   NodeDefinition,
+  PersonalSymbolMeaning,
+  SymbolDef,
+  SymbolOccurrence,
   Thread,
+  ThreadSummary,
 } from "../../types";
 
 const STATUS_LABELS: Record<ComputedNodeStatus["status"], string> = {
@@ -30,6 +35,19 @@ function formatThreadTitle(nodeTitle: string) {
   return `${nodeTitle} – ${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
 }
 
+function slugify(text: string) {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)+/g, "");
+}
+
+function parseDreamExtraction(message: Message): DreamExtraction | null {
+  const metadata = message.metadata as { dreamExtraction?: DreamExtraction } | undefined;
+  return metadata?.dreamExtraction ?? null;
+}
+
 export default function ChatPage() {
   const searchParams = useSearchParams();
   const nodeId = searchParams.get("nodeId");
@@ -41,8 +59,10 @@ export default function ChatPage() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [threadSummary, setThreadSummary] = useState<ThreadSummary | null>(null);
 
   const [composer, setComposer] = useState("");
+  const [dreamMode, setDreamMode] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -103,6 +123,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (!selectedThreadId) {
       setMessages([]);
+      setThreadSummary(null);
       return;
     }
     let active = true;
@@ -115,6 +136,23 @@ export default function ChatPage() {
       setMessages(results);
     };
     loadMessages();
+    return () => {
+      active = false;
+    };
+  }, [selectedThreadId]);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      setThreadSummary(null);
+      return;
+    }
+    let active = true;
+    const loadSummary = async () => {
+      const summary = await db.threadSummaries.get(selectedThreadId);
+      if (!active) return;
+      setThreadSummary(summary ?? null);
+    };
+    loadSummary();
     return () => {
       active = false;
     };
@@ -156,6 +194,62 @@ export default function ChatPage() {
     });
   };
 
+  const persistDreamExtraction = async (
+    extraction: DreamExtraction,
+    userMessage: Message,
+    nodeId: string
+  ) => {
+    const timestamp = nowIso();
+    for (const symbol of extraction.symbols) {
+      const symbolId = slugify(symbol.label);
+      const existingSymbol = await db.symbols.get(symbolId);
+      if (!existingSymbol) {
+        const symbolDef: SymbolDef = {
+          id: symbolId,
+          label: symbol.label,
+          category: symbol.category,
+          createdAt: timestamp,
+        };
+        await db.symbols.put(symbolDef);
+      }
+
+      const occurrence: SymbolOccurrence = {
+        id: crypto.randomUUID(),
+        symbolId,
+        messageId: userMessage.id,
+        nodeId,
+        contextSnippet: symbol.contextSnippet,
+        emotionTags: symbol.emotionTags ?? [],
+        createdAt: timestamp,
+      };
+      await db.symbolOccurrences.put(occurrence);
+
+      const existingMeaning = await db.personalSymbolMeanings.get(symbolId);
+      if (!existingMeaning) {
+        const meaning: PersonalSymbolMeaning = {
+          symbolId,
+          personalMeaning: "TBD",
+          confidence: 0.2,
+          originMessageIds: [userMessage.id],
+          lastUpdated: timestamp,
+        };
+        await db.personalSymbolMeanings.put(meaning);
+      } else if (symbol.suggestedMeaning) {
+        const suggestions = new Set(existingMeaning.suggestedMeanings ?? []);
+        suggestions.add(symbol.suggestedMeaning);
+        const updatedMeaning: PersonalSymbolMeaning = {
+          ...existingMeaning,
+          suggestedMeanings: Array.from(suggestions),
+          originMessageIds: existingMeaning.originMessageIds
+            ? Array.from(new Set([...existingMeaning.originMessageIds, userMessage.id]))
+            : [userMessage.id],
+          lastUpdated: timestamp,
+        };
+        await db.personalSymbolMeanings.put(updatedMeaning);
+      }
+    }
+  };
+
   const handleSend = async () => {
     if (!node || !selectedThreadId || !composer.trim()) return;
     if (isSending) return;
@@ -164,17 +258,13 @@ export default function ChatPage() {
     setComposer("");
     setErrorMessage(null);
 
-    const historySnapshot = messages.slice(-20).map((message) => ({
-      role: message.role,
-      content: message.content,
-    }));
-
     const userMessage: Message = {
       id: crypto.randomUUID(),
       threadId: selectedThreadId,
       role: "user",
       content: messageText,
       createdAt: nowIso(),
+      metadata: dreamMode ? { mode: "dream" } : undefined,
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -183,6 +273,10 @@ export default function ChatPage() {
 
     setIsSending(true);
     try {
+      const historySnapshot = [...messages, userMessage].map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -190,15 +284,26 @@ export default function ChatPage() {
           nodeId: node.id,
           threadId: selectedThreadId,
           userMessage: messageText,
-          nodeTitle: node.title,
-          promptTemplate: node.prompt_template,
-          status: status?.status ?? "locked",
-          unmetDependencies: status?.unmetDependencies ?? [],
-          currentNodeId: settings?.currentNodeId ?? null,
-          currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+          mode: dreamMode ? "dream" : "chat",
+          node: {
+            id: node.id,
+            title: node.title,
+            prompt_template: node.prompt_template,
+            domain: node.domain,
+            tags: node.tags,
+          },
+          status: status
+            ? { status: status.status, unmetDependencies: status.unmetDependencies ?? [] }
+            : undefined,
+          settings: {
+            currentNodeId: settings?.currentNodeId ?? null,
+            currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+          },
+          threadSummary,
           history: historySnapshot,
           apiKey: settings?.openAiApiKey,
           model: settings?.modelChat,
+          modelSummarize: settings?.modelSummarize,
         }),
       });
 
@@ -223,11 +328,111 @@ export default function ChatPage() {
       setMessages((prev) => [...prev, assistantMessage]);
       await db.messages.put(assistantMessage);
       await updateThreadTimestamp(selectedThreadId);
+
+      const summaryPayload = data?.threadSummary as ThreadSummary | null | undefined;
+      if (summaryPayload) {
+        await db.threadSummaries.put(summaryPayload);
+        setThreadSummary(summaryPayload);
+      }
+
+      if (dreamMode) {
+        const relevantNodes = await getRelevantNextNodes(selectedThreadId, node.id);
+        const dreamResponse = await fetch("/api/extract-dream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nodeId: node.id,
+            threadId: selectedThreadId,
+            messageId: userMessage.id,
+            dreamText: messageText,
+            nodeTitle: node.title,
+            promptTemplate: node.prompt_template,
+            status: status
+              ? { status: status.status, unmetDependencies: status.unmetDependencies ?? [] }
+              : undefined,
+            settings: {
+              currentNodeId: settings?.currentNodeId ?? null,
+              currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+            },
+            relevantNextNodes: relevantNodes.map((item) => ({
+              id: item.id,
+              title: item.title,
+              promptTemplate: item.prompt_template,
+              domain: item.domain,
+              tags: item.tags,
+            })),
+            apiKey: settings?.openAiApiKey,
+            model: settings?.modelExtract,
+          }),
+        });
+
+        if (dreamResponse.ok) {
+          const dreamData = await dreamResponse.json();
+          const extraction = dreamData?.extraction as DreamExtraction | undefined;
+          if (extraction) {
+            const updatedAssistant: Message = {
+              ...assistantMessage,
+              metadata: { dreamExtraction: extraction },
+            };
+            await db.messages.put(updatedAssistant);
+            setMessages((prev) =>
+              prev.map((msg) => (msg.id === assistantMessage.id ? updatedAssistant : msg))
+            );
+            await persistDreamExtraction(extraction, userMessage, node.id);
+          }
+        }
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to send message.";
       setErrorMessage(message);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleSummarizeNow = async () => {
+    if (!node || !selectedThreadId || messages.length === 0) return;
+    setErrorMessage(null);
+    try {
+      const response = await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          threadId: selectedThreadId,
+          nodeId: node.id,
+          nodeTitle: node.title,
+          promptTemplate: node.prompt_template,
+          status: status
+            ? { status: status.status, unmetDependencies: status.unmetDependencies ?? [] }
+            : undefined,
+          settings: {
+            currentNodeId: settings?.currentNodeId ?? null,
+            currentSpiralOrder: settings?.currentSpiralOrder ?? null,
+          },
+          history: messages.map((message) => ({
+            role: message.role,
+            content: message.content,
+          })),
+          existingSummary: threadSummary,
+          apiKey: settings?.openAiApiKey,
+          model: settings?.modelSummarize ?? settings?.modelChat,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error ?? "Failed to summarize thread.");
+      }
+
+      const data = await response.json();
+      const summary = data?.threadSummary as ThreadSummary | undefined;
+      if (summary) {
+        await db.threadSummaries.put(summary);
+        setThreadSummary(summary);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to summarize thread.";
+      setErrorMessage(message);
     }
   };
 
@@ -331,6 +536,39 @@ export default function ChatPage() {
               </div>
             ) : (
               <div className="flex flex-col gap-4">
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/70 px-4 py-3 text-xs text-slate-200">
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold uppercase tracking-wide text-slate-400">
+                      Summary
+                    </div>
+                    <button
+                      onClick={handleSummarizeNow}
+                      className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 hover:bg-slate-700"
+                    >
+                      Summarize now
+                    </button>
+                  </div>
+                  {threadSummary ? (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-slate-300">
+                        View summary &amp; key motifs
+                      </summary>
+                      <div className="mt-2 whitespace-pre-wrap text-slate-200">
+                        {threadSummary.summary}
+                      </div>
+                      {threadSummary.keyMotifs?.length ? (
+                        <div className="mt-2 text-slate-300">
+                          Key motifs: {threadSummary.keyMotifs.join(", ")}
+                        </div>
+                      ) : null}
+                      <div className="mt-2 text-[11px] text-slate-500">
+                        Updated {new Date(threadSummary.updatedAt).toLocaleString()}
+                      </div>
+                    </details>
+                  ) : (
+                    <p className="mt-2 text-slate-400">No summary yet.</p>
+                  )}
+                </div>
                 {messages.map((message) => (
                   <div
                     key={message.id}
@@ -341,6 +579,9 @@ export default function ChatPage() {
                     }`}
                   >
                     <p className="whitespace-pre-wrap">{message.content}</p>
+                    {message.role === "assistant" && parseDreamExtraction(message) ? (
+                      <DreamExtractionPanel extraction={parseDreamExtraction(message)!} />
+                    ) : null}
                   </div>
                 ))}
                 {isSending && (
@@ -359,6 +600,23 @@ export default function ChatPage() {
                 {errorMessage}
               </div>
             )}
+            <div className="mb-3 flex items-center gap-2 text-xs text-slate-300">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={dreamMode}
+                  onChange={(event) => setDreamMode(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500"
+                  disabled={!selectedThread || isSending}
+                />
+                Dream mode
+              </label>
+              {dreamMode ? (
+                <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200">
+                  Extraction on send
+                </span>
+              ) : null}
+            </div>
             <div className="flex items-end gap-3">
               <textarea
                 value={composer}
@@ -380,5 +638,139 @@ export default function ChatPage() {
         </div>
       </section>
     </main>
+  );
+}
+
+function DreamExtractionPanel({ extraction }: { extraction: DreamExtraction }) {
+  const [meaningMap, setMeaningMap] = useState<Record<string, PersonalSymbolMeaning | null>>({});
+  const [editingSymbolId, setEditingSymbolId] = useState<string | null>(null);
+  const [draftMeaning, setDraftMeaning] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const loadMeanings = async () => {
+      const entries: Record<string, PersonalSymbolMeaning | null> = {};
+      for (const symbol of extraction.symbols) {
+        const symbolId = slugify(symbol.label);
+        entries[symbolId] = (await db.personalSymbolMeanings.get(symbolId)) ?? null;
+      }
+      if (!active) return;
+      setMeaningMap(entries);
+    };
+    loadMeanings();
+    return () => {
+      active = false;
+    };
+  }, [extraction.symbols]);
+
+  const handleEdit = (symbolId: string) => {
+    setEditingSymbolId(symbolId);
+    setDraftMeaning(meaningMap[symbolId]?.personalMeaning ?? "");
+  };
+
+  const handleSave = async () => {
+    if (!editingSymbolId) return;
+    const timestamp = nowIso();
+    const existing = meaningMap[editingSymbolId];
+    const updated: PersonalSymbolMeaning = existing
+      ? {
+          ...existing,
+          personalMeaning: draftMeaning.trim() || existing.personalMeaning,
+          lastUpdated: timestamp,
+        }
+      : {
+          symbolId: editingSymbolId,
+          personalMeaning: draftMeaning.trim() || "TBD",
+          confidence: 0.2,
+          lastUpdated: timestamp,
+        };
+    await db.personalSymbolMeanings.put(updated);
+    setMeaningMap((prev) => ({ ...prev, [editingSymbolId]: updated }));
+    setEditingSymbolId(null);
+    setDraftMeaning("");
+  };
+
+  return (
+    <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-xs text-slate-200">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        Dream extraction
+      </div>
+      <div className="mt-2">
+        <div className="font-semibold text-slate-300">Symbols</div>
+        <ul className="mt-1 space-y-2">
+          {extraction.symbols.map((symbol) => {
+            const symbolId = slugify(symbol.label);
+            const meaning = meaningMap[symbolId];
+            return (
+              <li key={symbolId} className="rounded-lg border border-slate-800 bg-slate-900/40 p-2">
+                <div className="flex items-center justify-between">
+                  <div className="font-medium text-slate-100">{symbol.label}</div>
+                  <button
+                    onClick={() => handleEdit(symbolId)}
+                    className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 hover:bg-slate-700"
+                  >
+                    Add/Update personal meaning
+                  </button>
+                </div>
+                <div className="mt-1 text-[11px] text-slate-400">
+                  {symbol.category ? `Category: ${symbol.category}` : "Category: Unspecified"}
+                </div>
+                <div className="mt-1 text-slate-300">{symbol.contextSnippet}</div>
+                {symbol.emotionTags?.length ? (
+                  <div className="mt-1 text-slate-400">
+                    Emotions: {symbol.emotionTags.join(", ")}
+                  </div>
+                ) : null}
+                {symbol.suggestedMeaning ? (
+                  <div className="mt-1 text-slate-400">
+                    Suggested meaning: {symbol.suggestedMeaning}
+                  </div>
+                ) : null}
+                <div className="mt-1 text-slate-400">
+                  Personal meaning: {meaning?.personalMeaning ?? "TBD"}
+                </div>
+                {editingSymbolId === symbolId ? (
+                  <div className="mt-2 space-y-2">
+                    <textarea
+                      value={draftMeaning}
+                      onChange={(event) => setDraftMeaning(event.target.value)}
+                      className="min-h-[60px] w-full resize-none rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleSave}
+                        className="rounded-md border border-sky-500/60 bg-sky-500/20 px-2 py-1 text-[11px] text-sky-100 hover:bg-sky-500/30"
+                      >
+                        Save meaning
+                      </button>
+                      <button
+                        onClick={() => setEditingSymbolId(null)}
+                        className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 hover:bg-slate-700"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      <div className="mt-3">
+        <div className="font-semibold text-slate-300">Relevance to next steps</div>
+        <ul className="mt-1 list-disc space-y-1 pl-4 text-slate-300">
+          {extraction.hypotheses.map((item, index) => (
+            <li key={`${item}-${index}`}>{item}</li>
+          ))}
+        </ul>
+      </div>
+      {extraction.question ? (
+        <div className="mt-3 text-slate-300">
+          <span className="font-semibold text-slate-300">Clarifying question:</span>{" "}
+          {extraction.question}
+        </div>
+      ) : null}
+    </div>
   );
 }

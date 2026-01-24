@@ -193,3 +193,33 @@ export async function getLockReason(nodeId: string): Promise<string | null> {
   if (!s || s.status !== "locked") return null;
   return s.unmetDependencies?.length ? `Requires: ${s.unmetDependencies.join(", ")}` : "Locked";
 }
+
+export async function getRelevantNextNodes(threadId: string | null, nodeId: string) {
+  void threadId;
+  const [nodes, statuses] = await Promise.all([getAllNodes(), computeNodeStatuses()]);
+  const currentNode = nodes.find((node) => node.id === nodeId) ?? null;
+  const nextNode = nodes.find((node) => statuses.get(node.id)?.status === "next") ?? null;
+
+  const availableNodes = nodes.filter((node) => statuses.get(node.id)?.status === "available");
+  const currentTags = new Set(currentNode?.tags ?? []);
+
+  const scored = availableNodes
+    .filter((node) => node.id !== nextNode?.id)
+    .map((node) => {
+      const tagOverlap = (node.tags ?? []).reduce(
+        (acc, tag) => acc + (currentTags.has(tag) ? 1 : 0),
+        0
+      );
+      const domainMatch = currentNode?.domain && node.domain === currentNode.domain ? 1 : 0;
+      return { node, score: tagOverlap + domainMatch };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4)
+    .map((entry) => entry.node);
+
+  const results = [nextNode, ...scored].filter(Boolean) as NodeDefinition[];
+  if (!results.length && threadId) {
+    return [];
+  }
+  return results;
+}
