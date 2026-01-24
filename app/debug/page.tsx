@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { db } from "../../db";
 import { computeNodeStatuses } from "../../journey";
+import { normalizeModel } from "../../model";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
 import type { AppSettings, ComputedNodeStatus, NodeDefinition } from "../../types";
 
@@ -145,7 +146,7 @@ export default function DebugPage() {
       currentNodeId: settings?.currentNodeId ?? null,
       currentSpiralOrder: settings?.currentSpiralOrder ?? null,
       apiKey: settings?.openAiApiKey ?? undefined,
-      model: settings?.modelChat ?? "gpt-5-nano",
+      model: normalizeModel(settings?.modelChat),
     }),
     [chatMessage, chatThreadId, selectedNodeId, selectedStatus, settings]
   );
@@ -162,7 +163,7 @@ export default function DebugPage() {
       currentSpiralOrder: settings?.currentSpiralOrder ?? null,
       history: SAMPLE_SUMMARY_HISTORY,
       apiKey: settings?.openAiApiKey ?? undefined,
-      model: settings?.modelSummarize ?? "gpt-5-nano",
+      model: normalizeModel(settings?.modelSummarize),
     }),
     [nodes, selectedNodeId, selectedStatus, settings, summaryThreadId]
   );

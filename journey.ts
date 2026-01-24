@@ -3,6 +3,7 @@
 // Status is derived (completed/locked/available/next) from NodeDefinitions + UserNodeState.
 
 import { db } from "./db";
+import { DEFAULT_MODEL } from "./model";
 import type {
   NodeDefinition,
   ComputedNodeStatus,
@@ -76,9 +77,9 @@ export async function setCurrentNode(nodeId: string) {
     currentNodeId: nodeId,
     currentSpiralOrder: s?.currentSpiralOrder,
     openAiApiKey: s?.openAiApiKey ?? defaultOpenAiApiKey,
-    modelChat: s?.modelChat ?? "gpt-5-nano",
-    modelExtract: s?.modelExtract ?? "gpt-5-nano",
-    modelSummarize: s?.modelSummarize ?? "gpt-5-nano",
+    modelChat: s?.modelChat ?? DEFAULT_MODEL,
+    modelExtract: s?.modelExtract ?? DEFAULT_MODEL,
+    modelSummarize: s?.modelSummarize ?? DEFAULT_MODEL,
     updatedAt: nowIso(),
   });
 }

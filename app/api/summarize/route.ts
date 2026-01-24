@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { buildSummarizePrompt, parseSummaryResponse } from "../../../src/lib/server/summarization";
 import type { ThreadSummary } from "../../../types";
+import { normalizeModel } from "../../../model";
 
 type SummarizeRequest = {
   threadId: string;
@@ -56,7 +57,7 @@ export async function POST(request: Request) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: payload.model ?? "gpt-5-nano",
+      model: normalizeModel(payload.model),
       messages: [
         { role: "system", content: prompt.system },
         { role: "user", content: prompt.user },

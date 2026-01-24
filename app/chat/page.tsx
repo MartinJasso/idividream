@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { db } from "../../db";
 import { computeNodeStatuses, getGlobalSettings } from "../../journey";
+import { normalizeModel } from "../../model";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../../seed";
 import type {
   AppSettings,
@@ -331,7 +332,7 @@ export default function ChatPageRoute() {
         })),
         existingSummary: threadSummary,
         apiKey: settings?.openAiApiKey,
-        model: settings?.modelChat,
+        model: normalizeModel(settings?.modelChat),
       }),
     });
 
@@ -450,7 +451,7 @@ export default function ChatPageRoute() {
             : null,
           personalSymbolMeanings,
           apiKey: settings?.openAiApiKey,
-          model: settings?.modelExtract,
+          model: normalizeModel(settings?.modelExtract),
         }),
       });
 
@@ -588,7 +589,7 @@ export default function ChatPageRoute() {
           history: historySnapshot,
           threadSummary,
           apiKey: settings?.openAiApiKey,
-          model: settings?.modelChat,
+          model: normalizeModel(settings?.modelChat),
         }),
       });
 

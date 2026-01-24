@@ -3,6 +3,7 @@
 // Designed for serverless/local-first usage.
 
 import { db } from "./db";
+import { DEFAULT_MODEL } from "./model";
 import type { NodesFile, NodeDefinition, AppSettings, UserNodeState } from "./types";
 
 function nowIso() {
@@ -96,9 +97,9 @@ export async function upsertGlobalSettings(partial: Partial<AppSettings>) {
     currentNodeId: existing?.currentNodeId,
     currentSpiralOrder: existing?.currentSpiralOrder,
     openAiApiKey: existing?.openAiApiKey ?? defaultOpenAiApiKey,
-    modelChat: existing?.modelChat ?? "gpt-5-nano",
-    modelExtract: existing?.modelExtract ?? "gpt-5-nano",
-    modelSummarize: existing?.modelSummarize ?? "gpt-5-nano",
+    modelChat: existing?.modelChat ?? DEFAULT_MODEL,
+    modelExtract: existing?.modelExtract ?? DEFAULT_MODEL,
+    modelSummarize: existing?.modelSummarize ?? DEFAULT_MODEL,
     updatedAt: nowIso(),
     ...partial,
     key,

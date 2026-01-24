@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { NextResponse } from "next/server";
 import type { NodesFile } from "../../../types";
+import { normalizeModel } from "../../../model";
 
 type ExtractDreamRequest = {
   nodeId: string;
@@ -132,7 +133,7 @@ export async function POST(request: Request) {
   ].join("\n");
 
   const body = {
-    model: payload.model ?? "gpt-5-nano",
+    model: normalizeModel(payload.model),
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },

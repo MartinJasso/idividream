@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { db } from "../db";
 import { computeNodeStatuses } from "../journey";
+import { DEFAULT_MODEL, normalizeModel } from "../model";
 import { ensureUserNodeStateRows, seedNodeDefinitionsFromUrl } from "../seed";
 import type {
   AppSettings,
@@ -96,7 +97,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
   useEffect(() => {
     if (!settings) return;
     setApiKeyInput(settings.openAiApiKey ?? "");
-    setModelChatInput(settings.modelChat ?? "");
+    setModelChatInput(normalizeModel(settings.modelChat));
   }, [settings]);
 
   useEffect(() => {
@@ -190,13 +191,13 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
 
   const handleSaveSettings = async () => {
     const trimmedKey = apiKeyInput.trim();
-    const trimmedModel = modelChatInput.trim();
+    const normalizedModel = normalizeModel(modelChatInput);
     const updated: AppSettings = {
       key: "global",
       currentNodeId: settings?.currentNodeId ?? undefined,
       currentSpiralOrder: settings?.currentSpiralOrder ?? undefined,
       openAiApiKey: trimmedKey ? trimmedKey : undefined,
-      modelChat: trimmedModel ? trimmedModel : undefined,
+      modelChat: normalizedModel,
       modelExtract: settings?.modelExtract,
       modelSummarize: settings?.modelSummarize,
       updatedAt: nowIso(),
@@ -204,7 +205,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
     await db.appSettings.put(updated);
     setSettings(updated);
     setApiKeyInput(trimmedKey);
-    setModelChatInput(trimmedModel);
+    setModelChatInput(normalizedModel);
     appendLog("success", "Settings saved.");
   };
 
@@ -259,7 +260,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
           currentSpiralOrder: settings?.currentSpiralOrder ?? null,
           history: historySnapshot,
           apiKey: effectiveApiKey,
-          model: settings?.modelChat,
+          model: normalizeModel(settings?.modelChat ?? modelChatInput),
         }),
       });
 
@@ -375,7 +376,7 @@ export default function ChatPage({ nodeId }: ChatPageProps) {
             <input
               value={modelChatInput}
               onChange={(event) => setModelChatInput(event.target.value)}
-              placeholder="gpt-5-nano"
+              placeholder={DEFAULT_MODEL}
               className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:border-sky-500 focus:outline-none"
             />
           </div>
