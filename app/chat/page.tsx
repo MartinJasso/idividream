@@ -11,6 +11,7 @@ import type {
   ComputedNodeStatus,
   Message,
   NodeDefinition,
+  PersonalSymbolMeaning,
   Thread,
   ThreadSummary,
 } from "../../types";
@@ -31,6 +32,57 @@ function formatThreadTitle(nodeTitle: string) {
   return `${nodeTitle} – ${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
 }
 
+type DreamScene = {
+  idx: number;
+  summary: string;
+  emotions: string[];
+};
+
+type DreamSymbol = {
+  label: string;
+  category?: "place" | "object" | "person" | "animal" | "action" | "emotion" | "other";
+  contextSnippet: string;
+  emotionTags: string[];
+};
+
+type DreamRelevance = {
+  nextNodeId: string | null;
+  nextNodeTitle: string | null;
+  hypotheses: string[];
+};
+
+type DreamExtraction = {
+  scenes: DreamScene[];
+  symbols: DreamSymbol[];
+  relevance: DreamRelevance;
+  clarifyingQuestion: string;
+};
+
+type DreamExtractionRecord = {
+  status: "pending" | "ready" | "error";
+  data?: DreamExtraction;
+  error?: string;
+  assistantMessageId?: string;
+  personalMeanings?: Record<string, PersonalSymbolMeaning | null>;
+};
+
+type SymbolMeaningContext = {
+  symbolId: string;
+  label: string;
+  personalMeaning: string;
+  valence?: number;
+  confidence?: number;
+};
+
+function slugifySymbol(label: string) {
+  const slug = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return slug || "symbol";
+}
+
 export default function ChatPageRoute() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -38,7 +90,11 @@ export default function ChatPageRoute() {
   const [node, setNode] = useState<NodeDefinition | null>(null);
   const [status, setStatus] = useState<ComputedNodeStatus | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [nextNode, setNextNode] = useState<{ id: string; title: string } | null>(null);
+  const [nextNode, setNextNode] = useState<{
+    id: string;
+    title: string;
+    promptTemplate?: string;
+  } | null>(null);
 
   const [threads, setThreads] = useState<Thread[]>([]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -48,6 +104,16 @@ export default function ChatPageRoute() {
   const [composer, setComposer] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [dreamMode, setDreamMode] = useState(false);
+  const [dreamExtractions, setDreamExtractions] = useState<Record<string, DreamExtractionRecord>>(
+    {}
+  );
+  const [symbolEditorByMessage, setSymbolEditorByMessage] = useState<Record<string, string | null>>(
+    {}
+  );
+  const [symbolDrafts, setSymbolDrafts] = useState<
+    Record<string, { personalMeaning: string; valence: string }>
+  >({});
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const seededRef = useRef(false);
@@ -113,7 +179,15 @@ export default function ChatPageRoute() {
       if (nextEntry) {
         const nextNodeRow = await db.nodeDefinitions.get(nextEntry.nodeId);
         if (!active) return;
-        setNextNode(nextNodeRow ? { id: nextNodeRow.id, title: nextNodeRow.title } : null);
+        setNextNode(
+          nextNodeRow
+            ? {
+                id: nextNodeRow.id,
+                title: nextNodeRow.title,
+                promptTemplate: nextNodeRow.prompt_template,
+              }
+            : null
+        );
       } else {
         setNextNode(null);
       }
@@ -194,6 +268,16 @@ export default function ChatPageRoute() {
     [threads, selectedThreadId]
   );
 
+  const extractionByAssistantId = useMemo(() => {
+    const map = new Map<string, { messageId: string; record: DreamExtractionRecord }>();
+    Object.entries(dreamExtractions).forEach(([messageId, record]) => {
+      if (record.assistantMessageId) {
+        map.set(record.assistantMessageId, { messageId, record });
+      }
+    });
+    return map;
+  }, [dreamExtractions]);
+
   const handleNewThread = async () => {
     if (!node) return;
     const id = crypto.randomUUID();
@@ -264,11 +348,205 @@ export default function ChatPageRoute() {
     }
   };
 
+  const buildSymbolMeaningContext = async (dreamText: string) => {
+    const lower = dreamText.toLowerCase();
+    const [symbols, meanings] = await Promise.all([
+      db.symbols.toArray(),
+      db.personalSymbolMeanings.toArray(),
+    ]);
+    const meaningsById = new Map<string, PersonalSymbolMeaning>();
+    meanings.forEach((row) => meaningsById.set(row.symbolId, row));
+
+    const matched: SymbolMeaningContext[] = [];
+    symbols.forEach((symbol) => {
+      if (!symbol.label) return;
+      if (!lower.includes(symbol.label.toLowerCase())) return;
+      const meaning = meaningsById.get(symbol.id);
+      if (!meaning || !meaning.personalMeaning.trim()) return;
+      matched.push({
+        symbolId: symbol.id,
+        label: symbol.label,
+        personalMeaning: meaning.personalMeaning,
+        valence: meaning.valence,
+        confidence: meaning.confidence,
+      });
+    });
+
+    return matched.slice(0, 12);
+  };
+
+  const persistDreamExtraction = async (extraction: DreamExtraction, messageId: string) => {
+    if (!node) return {};
+    const createdAt = nowIso();
+    const personalMeanings: Record<string, PersonalSymbolMeaning | null> = {};
+
+    for (const symbol of extraction.symbols) {
+      const symbolId = slugifySymbol(symbol.label);
+      const existingSymbol = await db.symbols.get(symbolId);
+      await db.symbols.put({
+        id: symbolId,
+        label: symbol.label,
+        category: symbol.category,
+        globalNotes: existingSymbol?.globalNotes,
+        createdAt: existingSymbol?.createdAt ?? createdAt,
+      });
+
+      await db.symbolOccurrences.put({
+        id: crypto.randomUUID(),
+        symbolId,
+        messageId,
+        nodeId: node.id,
+        contextSnippet: symbol.contextSnippet,
+        emotionTags: symbol.emotionTags,
+        createdAt,
+      });
+
+      const existingMeaning = await db.personalSymbolMeanings.get(symbolId);
+      if (!existingMeaning) {
+        const placeholder: PersonalSymbolMeaning = {
+          symbolId,
+          personalMeaning: "",
+          confidence: 0.2,
+          lastUpdated: createdAt,
+        };
+        await db.personalSymbolMeanings.put(placeholder);
+        personalMeanings[symbolId] = placeholder;
+      } else {
+        personalMeanings[symbolId] = existingMeaning;
+      }
+    }
+
+    return personalMeanings;
+  };
+
+  const triggerDreamExtraction = async (messageId: string, dreamText: string) => {
+    if (!node || !selectedThreadId) return;
+    setDreamExtractions((prev) => ({
+      ...prev,
+      [messageId]: {
+        status: "pending",
+        assistantMessageId: prev[messageId]?.assistantMessageId,
+      },
+    }));
+
+    try {
+      const personalSymbolMeanings = await buildSymbolMeaningContext(dreamText);
+      const response = await fetch("/api/extract-dream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeId: node.id,
+          threadId: selectedThreadId,
+          messageId,
+          dreamText,
+          nodeTitle: node.title,
+          nodePromptTemplate: node.prompt_template,
+          nextNode: nextNode
+            ? {
+                id: nextNode.id,
+                title: nextNode.title,
+                promptTemplate: nextNode.promptTemplate,
+              }
+            : null,
+          personalSymbolMeanings,
+          apiKey: settings?.openAiApiKey,
+          model: settings?.modelExtract,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error ?? "Failed to extract dream symbols.");
+      }
+
+      const data = (await response.json()) as DreamExtraction;
+      const personalMeanings = await persistDreamExtraction(data, messageId);
+
+      setDreamExtractions((prev) => ({
+        ...prev,
+        [messageId]: {
+          ...prev[messageId],
+          status: "ready",
+          data,
+          personalMeanings,
+        },
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to extract dream symbols.";
+      setDreamExtractions((prev) => ({
+        ...prev,
+        [messageId]: {
+          ...prev[messageId],
+          status: "error",
+          error: message,
+        },
+      }));
+    }
+  };
+
+  const openSymbolEditor = (
+    messageId: string,
+    symbolId: string,
+    meaning: PersonalSymbolMeaning | null | undefined
+  ) => {
+    setSymbolEditorByMessage((prev) => ({
+      ...prev,
+      [messageId]: prev[messageId] === symbolId ? null : symbolId,
+    }));
+    const key = `${messageId}:${symbolId}`;
+    setSymbolDrafts((prev) => {
+      if (prev[key]) return prev;
+      return {
+        ...prev,
+        [key]: {
+          personalMeaning: meaning?.personalMeaning ?? "",
+          valence: typeof meaning?.valence === "number" ? String(meaning.valence) : "",
+        },
+      };
+    });
+  };
+
+  const handleSaveSymbolMeaning = async (messageId: string, symbolId: string) => {
+    const key = `${messageId}:${symbolId}`;
+    const draft = symbolDrafts[key];
+    if (!draft) return;
+    const parsedValence =
+      draft.valence.trim() === "" ? undefined : Math.max(-2, Math.min(2, Number(draft.valence)));
+    const valence = Number.isNaN(parsedValence) ? undefined : parsedValence;
+
+    const existing = await db.personalSymbolMeanings.get(symbolId);
+    const updated: PersonalSymbolMeaning = {
+      symbolId,
+      personalMeaning: draft.personalMeaning.trim(),
+      valence,
+      confidence: existing?.confidence ?? 0.2,
+      lastUpdated: nowIso(),
+    };
+    await db.personalSymbolMeanings.put(updated);
+
+    setDreamExtractions((prev) => {
+      const record = prev[messageId];
+      if (!record) return prev;
+      return {
+        ...prev,
+        [messageId]: {
+          ...record,
+          personalMeanings: {
+            ...(record.personalMeanings ?? {}),
+            [symbolId]: updated,
+          },
+        },
+      };
+    });
+    setSymbolEditorByMessage((prev) => ({ ...prev, [messageId]: null }));
+  };
+
   const handleSend = async () => {
     if (!node || !selectedThreadId || !composer.trim()) return;
     if (isSending) return;
 
     const messageText = composer.trim();
+    const dreamModeEnabled = dreamMode;
     setComposer("");
     setErrorMessage(null);
 
@@ -286,6 +564,9 @@ export default function ChatPageRoute() {
 
     setIsSending(true);
     try {
+      if (dreamModeEnabled) {
+        void triggerDreamExtraction(userMessage.id, messageText);
+      }
       const historySnapshot = [...messages, userMessage].map((message) => ({
         role: message.role,
         content: message.content,
@@ -333,6 +614,15 @@ export default function ChatPageRoute() {
       await db.messages.put(assistantMessage);
       await updateThreadTimestamp(selectedThreadId);
       setIsSending(false);
+      if (dreamModeEnabled) {
+        setDreamExtractions((prev) => ({
+          ...prev,
+          [userMessage.id]: {
+            ...(prev[userMessage.id] ?? { status: "pending" }),
+            assistantMessageId: assistantMessage.id,
+          },
+        }));
+      }
 
       const updatedMessages = [...messages, userMessage, assistantMessage];
       if (shouldSummarize(updatedMessages)) {
@@ -490,15 +780,218 @@ export default function ChatPageRoute() {
                   )}
                 </div>
                 {messages.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`max-w-2xl rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                      message.role === "user"
-                        ? "ml-auto bg-sky-500/20 text-sky-100"
-                        : "bg-slate-900 text-slate-100"
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap">{message.content}</p>
+                  <div key={message.id} className="flex flex-col gap-2">
+                    <div
+                      className={`max-w-2xl rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                        message.role === "user"
+                          ? "ml-auto bg-sky-500/20 text-sky-100"
+                          : "bg-slate-900 text-slate-100"
+                      }`}
+                    >
+                      <p className="whitespace-pre-wrap">{message.content}</p>
+                    </div>
+                    {message.role === "user" &&
+                      dreamExtractions[message.id]?.status === "pending" &&
+                      !dreamExtractions[message.id]?.assistantMessageId && (
+                        <div className="ml-auto text-xs text-slate-400">Extracting…</div>
+                      )}
+                    {message.role === "assistant" &&
+                      extractionByAssistantId.has(message.id) && (
+                        <div className="max-w-2xl rounded-2xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-xs text-slate-200">
+                          {(() => {
+                            const entry = extractionByAssistantId.get(message.id);
+                            if (!entry) return null;
+                            const record = entry.record;
+                            if (record.status === "pending") {
+                              return (
+                                <div className="flex items-center justify-between text-slate-300">
+                                  <span className="font-semibold text-slate-200">
+                                    Dream extraction
+                                  </span>
+                                  <span>Extracting…</span>
+                                </div>
+                              );
+                            }
+                            if (record.status === "error") {
+                              return (
+                                <div>
+                                  <div className="font-semibold text-slate-200">
+                                    Dream extraction
+                                  </div>
+                                  <div className="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-rose-200">
+                                    {record.error ?? "Failed to extract dream symbols."}
+                                  </div>
+                                </div>
+                              );
+                            }
+                            const data = record.data;
+                            if (!data) return null;
+                            return (
+                              <div className="flex flex-col gap-4">
+                                <div className="flex items-center justify-between">
+                                  <div className="font-semibold text-slate-200">
+                                    Dream extraction
+                                  </div>
+                                  <div className="text-[11px] text-slate-500">
+                                    {data.relevance.nextNodeTitle
+                                      ? `Relevant to: ${data.relevance.nextNodeTitle}`
+                                      : "No next node detected"}
+                                  </div>
+                                </div>
+                                {data.relevance.nextNodeId && data.relevance.nextNodeTitle ? (
+                                  <button
+                                    onClick={() =>
+                                      router.push(`/chat?nodeId=${data.relevance.nextNodeId}`)
+                                    }
+                                    className="self-start rounded-md border border-sky-500/50 bg-sky-500/10 px-3 py-1 text-[11px] font-semibold text-sky-100 hover:bg-sky-500/20"
+                                  >
+                                    Open next node chat
+                                  </button>
+                                ) : null}
+                                <div>
+                                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                                    Scenes
+                                  </div>
+                                  <ol className="mt-2 list-decimal space-y-2 pl-5 text-slate-200">
+                                    {data.scenes.map((scene) => (
+                                      <li key={scene.idx}>
+                                        <div>{scene.summary}</div>
+                                        {scene.emotions?.length ? (
+                                          <div className="mt-1 text-[11px] text-slate-400">
+                                            Emotions: {scene.emotions.join(", ")}
+                                          </div>
+                                        ) : null}
+                                      </li>
+                                    ))}
+                                  </ol>
+                                </div>
+                                <div>
+                                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                                    Symbols
+                                  </div>
+                                  <div className="mt-2 flex flex-wrap gap-2">
+                                    {data.symbols.map((symbol, symbolIndex) => {
+                                      const symbolId = slugifySymbol(symbol.label);
+                                      const meaning = record.personalMeanings?.[symbolId];
+                                      const editorOpen =
+                                        symbolEditorByMessage[entry.messageId] === symbolId;
+                                      const draftKey = `${entry.messageId}:${symbolId}`;
+                                      const draft = symbolDrafts[draftKey];
+                                      return (
+                                        <div
+                                          key={`${symbol.label}-${symbolIndex}`}
+                                          className="w-full"
+                                        >
+                                          <button
+                                            onClick={() =>
+                                              openSymbolEditor(entry.messageId, symbolId, meaning)
+                                            }
+                                            className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[11px] text-slate-100 hover:border-sky-500/60"
+                                          >
+                                            {symbol.label}
+                                            {symbol.category ? ` • ${symbol.category}` : ""}
+                                          </button>
+                                          <div className="mt-1 text-[11px] text-slate-400">
+                                            “{symbol.contextSnippet}”
+                                          </div>
+                                          {symbol.emotionTags?.length ? (
+                                            <div className="mt-1 text-[11px] text-slate-500">
+                                              Emotions: {symbol.emotionTags.join(", ")}
+                                            </div>
+                                          ) : null}
+                                          {editorOpen && (
+                                            <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
+                                              <label className="block text-[11px] uppercase tracking-wide text-slate-400">
+                                                Personal meaning
+                                              </label>
+                                              <textarea
+                                                value={draft?.personalMeaning ?? ""}
+                                                onChange={(event) =>
+                                                  setSymbolDrafts((prev) => ({
+                                                    ...prev,
+                                                    [draftKey]: {
+                                                      personalMeaning: event.target.value,
+                                                      valence: draft?.valence ?? "",
+                                                    },
+                                                  }))
+                                                }
+                                                className="mt-2 w-full resize-none rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
+                                                rows={3}
+                                              />
+                                              <label className="mt-3 block text-[11px] uppercase tracking-wide text-slate-400">
+                                                Valence (-2..+2)
+                                              </label>
+                                              <input
+                                                type="number"
+                                                min={-2}
+                                                max={2}
+                                                step={1}
+                                                value={draft?.valence ?? ""}
+                                                onChange={(event) =>
+                                                  setSymbolDrafts((prev) => ({
+                                                    ...prev,
+                                                    [draftKey]: {
+                                                      personalMeaning: draft?.personalMeaning ?? "",
+                                                      valence: event.target.value,
+                                                    },
+                                                  }))
+                                                }
+                                                className="mt-2 w-24 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100"
+                                              />
+                                              <div className="mt-3 flex gap-2">
+                                                <button
+                                                  onClick={() =>
+                                                    handleSaveSymbolMeaning(
+                                                      entry.messageId,
+                                                      symbolId
+                                                    )
+                                                  }
+                                                  className="rounded-md border border-sky-500/50 bg-sky-500/10 px-3 py-1 text-[11px] font-semibold text-sky-100 hover:bg-sky-500/20"
+                                                >
+                                                  Save meaning
+                                                </button>
+                                                <button
+                                                  onClick={() =>
+                                                    setSymbolEditorByMessage((prev) => ({
+                                                      ...prev,
+                                                      [entry.messageId]: null,
+                                                    }))
+                                                  }
+                                                  className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1 text-[11px] text-slate-200 hover:bg-slate-800"
+                                                >
+                                                  Cancel
+                                                </button>
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                                    Relevance to next step
+                                  </div>
+                                  <ul className="mt-2 list-disc space-y-1 pl-5 text-slate-200">
+                                    {data.relevance.hypotheses.map((item, idx) => (
+                                      <li key={`${item}-${idx}`}>{item}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                                <div>
+                                  <div className="text-[11px] uppercase tracking-wide text-slate-400">
+                                    Clarifying question
+                                  </div>
+                                  <p className="mt-2 text-slate-200">
+                                    {data.clarifyingQuestion}
+                                  </p>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
                   </div>
                 ))}
                 {isSending && (
@@ -526,13 +1019,25 @@ export default function ChatPageRoute() {
                 disabled={!selectedThread || isSending}
                 className="min-h-[70px] flex-1 resize-none rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               />
-              <button
-                onClick={handleSend}
-                disabled={!selectedThread || isSending || !composer.trim()}
-                className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Send
-              </button>
+              <div className="flex flex-col items-end gap-2">
+                <label className="flex items-center gap-2 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={dreamMode}
+                    onChange={(event) => setDreamMode(event.target.checked)}
+                    className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-sky-500"
+                    disabled={!selectedThread || isSending}
+                  />
+                  Dream mode
+                </label>
+                <button
+                  onClick={handleSend}
+                  disabled={!selectedThread || isSending || !composer.trim()}
+                  className="rounded-lg border border-sky-500/60 bg-sky-500/20 px-4 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Send
+                </button>
+              </div>
             </div>
           </div>
         </div>
