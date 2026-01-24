@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const navItems = [
   { label: "Journey", href: "/journey" },
   { label: "Chat", href: "/chat" },
+  { label: "Symbols", href: "/symbols" },
 ];
 
 export default function TopNav() {
