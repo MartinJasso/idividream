@@ -2,250 +2,195 @@
 
 import { useMemo, useState } from "react";
 
-type OnboardingStep = {
-  title: string;
-  detail: string;
-};
-
-type BotResponse = {
-  text: string;
-  command: string;
+type OnboardingStep = { title: string; detail: string };
+type ViewMode = "human" | "machine";
+type ChatMessage = {
+  role: "user" | "assistant";
+  humanMarkdown: string;
+  machineMarkdown: string;
 };
 
 const ONBOARDING_STEPS: OnboardingStep[] = [
-  {
-    title: "Plug in your Arduino",
-    detail:
-      "Connect your Arduino board with a USB cable. If this is your first time, install the board driver before continuing.",
-  },
-  {
-    title: "Upload the starter sketch",
-    detail:
-      "Use Arduino IDE to upload a serial sketch that listens to text commands like LED_ON, LED_OFF, SERVO:90, and PING.",
-  },
-  {
-    title: "Connect from the browser",
-    detail:
-      "Press Connect Arduino below and choose your serial port. Modern Chromium browsers support the Web Serial API.",
-  },
-  {
-    title: "Control with MoltBot",
-    detail:
-      "Ask MoltBot with natural language (for example: turn led on, servo 120, or ping). MoltBot translates to serial commands.",
-  },
+  { title: "Hardware", detail: "Connect Arduino by USB and verify power LED turns on." },
+  { title: "Sketch", detail: "Upload serial sketch that accepts LED_ON, LED_OFF, PING, SERVO:<angle>." },
+  { title: "Runtime", detail: "Set RETARMAX_MODE=docker to run one-CPU isolated agent container." },
+  { title: "Chat", detail: "Use markdown prompts in this webapp and read human/machine outputs." },
 ];
 
 const QUICK_ACTIONS = [
-  "turn led on",
-  "turn led off",
-  "servo 90",
-  "servo 150",
-  "ping",
+  "Turn led on and explain expected board behavior.",
+  "Set servo to 90 and provide validation checklist.",
+  "Give me a safe shutdown routine for Arduino sensors.",
 ];
-
-function parseMoltBotIntent(input: string): BotResponse {
-  const normalized = input.trim().toLowerCase();
-
-  if (normalized.includes("led") && (normalized.includes("on") || normalized.includes("start"))) {
-    return { text: "LED turning on.", command: "LED_ON" };
-  }
-
-  if (normalized.includes("led") && (normalized.includes("off") || normalized.includes("stop"))) {
-    return { text: "LED turning off.", command: "LED_OFF" };
-  }
-
-  if (normalized.includes("ping") || normalized.includes("status")) {
-    return { text: "Checking board status.", command: "PING" };
-  }
-
-  const servoMatch = normalized.match(/servo\s*(?:to)?\s*(\d{1,3})/);
-  if (servoMatch) {
-    const rawAngle = Number(servoMatch[1]);
-    const angle = Math.max(0, Math.min(180, rawAngle));
-    return {
-      text: `Moving servo to ${angle}°.`,
-      command: `SERVO:${angle}`,
-    };
-  }
-
-  return {
-    text: "I did not understand. Try: turn led on, turn led off, servo 90, or ping.",
-    command: "HELP",
-  };
-}
 
 export default function Home() {
   const [stepIndex, setStepIndex] = useState(0);
-  const [prompt, setPrompt] = useState("");
-  const [lastBotText, setLastBotText] = useState("MoltBot is ready. Start with: turn led on");
-  const [lastCommand, setLastCommand] = useState("-");
-  const [serialState, setSerialState] = useState("Disconnected");
+  const [input, setInput] = useState("");
+  const [viewMode, setViewMode] = useState<ViewMode>("human");
+  const [isSending, setIsSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  const progressPercent = useMemo(
+  const progress = useMemo(
     () => Math.round(((stepIndex + 1) / ONBOARDING_STEPS.length) * 100),
     [stepIndex]
   );
 
-  const sendToArduino = async (command: string) => {
-    if (typeof navigator === "undefined" || !("serial" in navigator)) {
-      setSerialState("Web Serial not available in this browser");
-      return;
-    }
+  const sendMessage = async (content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+
+    const userMessage: ChatMessage = {
+      role: "user",
+      humanMarkdown: trimmed,
+      machineMarkdown: trimmed,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput("");
+    setError(null);
+    setIsSending(true);
 
     try {
-      setSerialState("Connecting...");
-      const serialNavigator = navigator as Navigator & {
-        serial: {
-          requestPort: () => Promise<{
-            open: (options: { baudRate: number }) => Promise<void>;
-            writable: WritableStream<Uint8Array> | null;
-          }>;
-        };
-      };
+      const response = await fetch("/api/retarmax", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: trimmed,
+          history: messages.slice(-8).map((item) => ({ role: item.role, content: item.humanMarkdown })),
+        }),
+      });
 
-      const port = await serialNavigator.serial.requestPort();
-      await port.open({ baudRate: 9600 });
-
-      if (!port.writable) {
-        setSerialState("Connected, but no writable stream");
-        return;
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Retarmax-Bot failed.");
       }
 
-      const writer = port.writable.getWriter();
-      const payload = new TextEncoder().encode(`${command}\n`);
-      await writer.write(payload);
-      writer.releaseLock();
-      setSerialState(`Connected. Sent: ${command}`);
-    } catch {
-      setSerialState("Connection canceled or failed");
-    }
-  };
-
-  const runCommand = async (input: string) => {
-    const parsed = parseMoltBotIntent(input);
-    setLastBotText(parsed.text);
-    setLastCommand(parsed.command);
-    if (parsed.command !== "HELP") {
-      await sendToArduino(parsed.command);
+      const assistantMessage: ChatMessage = {
+        role: "assistant",
+        humanMarkdown: String(payload.humanMarkdown ?? ""),
+        machineMarkdown: String(payload.machineMarkdown ?? ""),
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Unknown error");
+    } finally {
+      setIsSending(false);
     }
   };
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-4 py-8 md:px-8">
       <header className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
-        <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">MoltBot + Arduino</p>
-        <h1 className="mt-2 text-3xl font-semibold md:text-4xl">Interactive control dashboard</h1>
-        <p className="mt-3 max-w-3xl text-sm text-slate-300 md:text-base">
-          This React + Node.js app helps you connect an Arduino board, run guided onboarding,
-          and send natural-language instructions to MoltBot for hardware control.
+        <p className="text-xs uppercase tracking-[0.2em] text-emerald-300">Retarmax-Bot</p>
+        <h1 className="mt-2 text-3xl font-semibold md:text-4xl">Arduino agent in isolated runtime</h1>
+        <p className="mt-2 text-sm text-slate-300">
+          Chat in markdown, run bot in one-CPU docker mode, and switch between human-readable and
+          machine-readable output from the same response.
         </p>
       </header>
 
-      <section className="grid gap-6 lg:grid-cols-[1.1fr_1.4fr]">
+      <section className="grid gap-6 lg:grid-cols-[1fr_1.45fr]">
         <article className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-xl font-medium">Onboarding tutorial</h2>
-            <span className="text-xs text-slate-400">{progressPercent}% complete</span>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Onboarding tutorial</h2>
+            <span className="text-xs text-slate-400">{progress}%</span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
-            <div
-              className="h-full rounded-full bg-emerald-400 transition-all"
-              style={{ width: `${progressPercent}%` }}
-            />
+          <div className="h-2 rounded-full bg-slate-800">
+            <div className="h-full rounded-full bg-emerald-400" style={{ width: `${progress}%` }} />
           </div>
-
-          <ol className="mt-4 space-y-3">
-            {ONBOARDING_STEPS.map((step, index) => {
-              const active = stepIndex === index;
-              return (
-                <li
-                  key={step.title}
-                  className={`rounded-lg border p-3 transition ${
-                    active
+          <ol className="mt-4 space-y-2">
+            {ONBOARDING_STEPS.map((step, index) => (
+              <li key={step.title}>
+                <button
+                  type="button"
+                  className={`w-full rounded-lg border p-3 text-left ${
+                    stepIndex === index
                       ? "border-emerald-400/70 bg-emerald-400/10"
                       : "border-slate-800 bg-slate-950/50"
                   }`}
+                  onClick={() => setStepIndex(index)}
                 >
-                  <button
-                    className="w-full text-left"
-                    onClick={() => setStepIndex(index)}
-                    type="button"
-                  >
-                    <p className="text-sm font-medium">{index + 1}. {step.title}</p>
-                    <p className="mt-1 text-xs text-slate-300">{step.detail}</p>
-                  </button>
-                </li>
-              );
-            })}
+                  <p className="text-sm font-medium">{index + 1}. {step.title}</p>
+                  <p className="mt-1 text-xs text-slate-300">{step.detail}</p>
+                </button>
+              </li>
+            ))}
           </ol>
-
-          <div className="mt-4 flex gap-2">
-            <button
-              type="button"
-              className="rounded-md border border-slate-700 bg-slate-800 px-3 py-2 text-sm disabled:opacity-50"
-              onClick={() => setStepIndex((value) => Math.max(0, value - 1))}
-              disabled={stepIndex === 0}
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              className="rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-slate-950 disabled:opacity-50"
-              onClick={() => setStepIndex((value) => Math.min(ONBOARDING_STEPS.length - 1, value + 1))}
-              disabled={stepIndex === ONBOARDING_STEPS.length - 1}
-            >
-              Next
-            </button>
-          </div>
         </article>
 
         <article className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          <h2 className="text-xl font-medium">MoltBot control console</h2>
-          <p className="mt-1 text-sm text-slate-300">
-            Type plain language commands and MoltBot converts them into Arduino serial instructions.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold">Markdown chat</h2>
+            <div className="flex rounded-lg border border-slate-700 p-1 text-xs">
+              <button
+                type="button"
+                onClick={() => setViewMode("human")}
+                className={`rounded px-2 py-1 ${viewMode === "human" ? "bg-emerald-500 text-slate-950" : "text-slate-300"}`}
+              >
+                Human view
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("machine")}
+                className={`rounded px-2 py-1 ${viewMode === "machine" ? "bg-emerald-500 text-slate-950" : "text-slate-300"}`}
+              >
+                Machine view
+              </button>
+            </div>
+          </div>
 
-          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
             {QUICK_ACTIONS.map((action) => (
               <button
                 key={action}
                 type="button"
-                onClick={() => runCommand(action)}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-left text-sm hover:bg-slate-700"
+                className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-2 text-left text-xs hover:bg-slate-700"
+                onClick={() => sendMessage(action)}
               >
                 {action}
               </button>
             ))}
           </div>
 
-          <label className="mt-4 block text-xs uppercase tracking-wide text-slate-400" htmlFor="commandInput">
-            Command input
-          </label>
-          <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-            <input
-              id="commandInput"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              placeholder="Example: servo 120"
-              className="flex-1 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none ring-emerald-400 focus:ring"
-            />
-            <button
-              type="button"
-              onClick={async () => {
-                if (!prompt.trim()) return;
-                await runCommand(prompt);
-                setPrompt("");
-              }}
-              className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950"
-            >
-              Send
-            </button>
+          <div className="mt-4 h-[360px] overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+            {messages.length === 0 ? (
+              <p className="text-sm text-slate-400">Start a chat. Input and output are markdown.</p>
+            ) : (
+              <ul className="space-y-3">
+                {messages.map((message, index) => (
+                  <li key={`${message.role}-${index}`} className="rounded border border-slate-800 bg-slate-900/70 p-3">
+                    <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">{message.role}</p>
+                    <pre className="whitespace-pre-wrap text-xs text-slate-100">
+                      {viewMode === "human" ? message.humanMarkdown : message.machineMarkdown}
+                    </pre>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
-          <div className="mt-5 space-y-2 rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-sm">
-            <p><span className="text-slate-400">MoltBot:</span> {lastBotText}</p>
-            <p><span className="text-slate-400">Last command:</span> {lastCommand}</p>
-            <p><span className="text-slate-400">Serial status:</span> {serialState}</p>
+          <label className="mt-4 block text-xs uppercase tracking-wide text-slate-400" htmlFor="chat-input">
+            Markdown prompt
+          </label>
+          <textarea
+            id="chat-input"
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            rows={4}
+            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm outline-none ring-emerald-400 focus:ring"
+            placeholder="Example: Create a step-by-step plan to test LED and servo safely."
+          />
+          <div className="mt-2 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => sendMessage(input)}
+              disabled={isSending}
+              className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-50"
+            >
+              {isSending ? "Sending..." : "Send"}
+            </button>
+            {error && <p className="text-xs text-rose-300">{error}</p>}
           </div>
         </article>
       </section>
