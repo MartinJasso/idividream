@@ -1,26 +1,43 @@
-# Local-first library files
+# Idividream
 
-These files assume:
-- You serve `nodes.json` at `/nodes.json` (e.g. in Next.js `public/nodes.json`).
-- You use IndexedDB via Dexie for persistence (serverless/local-first).
-- Node status is computed, not stored (completed/locked/available/next).
+Retarmax-Bot web app for Arduino workflows.
 
-## Install
+## Features
+- Guided onboarding checklist for Arduino setup.
+- GPT-style markdown chat UI.
+- Same assistant response in two readers:
+  - Human view (plain markdown)
+  - Machine view (markdown wrapped in JSON markdown block)
+- Server route `/api/retarmax` with runtime modes:
+  - `mock` (default)
+  - `openai`
+  - `docker` (isolated container, one CPU)
+
+## Run
 ```bash
-npm i dexie
+npm install
+npm run dev
 ```
 
-## Seed nodes on app start
-```ts
-import { seedNodeDefinitionsFromUrl } from "./seed";
+## Optional: isolated docker agent mode (Mac/local)
+Set env vars before running:
 
-await seedNodeDefinitionsFromUrl("/nodes.json");
+```bash
+export RETARMAX_MODE=docker
+export RETARMAX_DOCKER_IMAGE=ghcr.io/openai/codex-mini-agent:latest
+npm run dev
 ```
 
-## Compute UI statuses
-```ts
-import { computeNodeStatuses } from "./journey";
+The API executes:
+```bash
+docker run --rm --cpus=1 -i $RETARMAX_DOCKER_IMAGE
+```
+and passes markdown input through stdin.
 
-const statuses = await computeNodeStatuses();
-console.log(statuses.get("persona_building"));
+## Optional: OpenAI mode
+```bash
+export RETARMAX_MODE=openai
+export OPENAI_API_KEY=...
+export RETARMAX_MODEL=gpt-5-nano
+npm run dev
 ```
